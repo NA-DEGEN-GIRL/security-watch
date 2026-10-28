@@ -10,7 +10,7 @@ Windows PC와, 이 PC에서 SSH로 관리하는 Linux 서버들을 지켜보는 
 *대시보드 (데모 데이터, 주소는 문서용 예시)*
 
 - **읽기 전용:** 점검하는 서버와 PC의 상태를 바꾸지 않습니다.
-- **외부 라이브러리 없음:** Rust 표준 라이브러리만 쓰고, Windows에 기본으로 있는 `ssh`, PowerShell, Edge를 이용합니다. 서버에는 아무것도 설치하지 않으며, SSH로 셸 스크립트를 실행해서 점검합니다.
+- **최소 의존성:** 창 표시용 `eframe`(egui) 크레이트 하나만 쓰고, 나머지는 Rust 표준 라이브러리와 Windows에 기본으로 있는 `ssh`, PowerShell을 이용합니다. 서버에는 아무것도 설치하지 않으며, SSH로 셸 스크립트를 실행해서 점검합니다.
 - **개인 정보 분리:** 호스트 이름, 기준선, 리포트는 git에서 제외되는 폴더에만 저장됩니다.
 
 ## 대시보드
@@ -57,11 +57,11 @@ Windows PC와, 이 PC에서 SSH로 관리하는 Linux 서버들을 지켜보는 
    host my-server lan      # ~/.ssh/config의 Host 별칭, 키 인증 접속
    host my-vps public      # 인터넷에 직접 열린 서버: 공인 IP 대입 시도는 '정보'로만 집계
    ```
-4. `.private\security-watch.exe`를 더블클릭합니다. 창을 닫으면 프로그램도 종료됩니다.
+4. `.private\security-watch.exe`를 더블클릭합니다. 자체 아이콘을 가진 창 하나로 열리고, 일반 프로그램처럼 작업표시줄에 고정할 수 있습니다. 창을 닫으면 프로그램과 `ssh`/PowerShell 보조 프로세스가 함께 종료되고, 실행 중에 다시 실행하면 기존 창이 앞으로 나옵니다.
 
 서버 요구 사항: 비밀번호 입력 없는 키 인증 SSH(`BatchMode`), 그리고 journal 읽기 권한(`adm` 또는 `systemd-journal` 그룹) 또는 비밀번호 없는 `sudo`. journal을 읽을 수 없으면 추측하지 않고 그 사실을 표시합니다. `sudo`가 없으면 다른 사용자의 연결은 프로세스 이름이 "권한 필요"로 나옵니다.
 
-`security-watch.exe --once`는 텍스트 리포트를 한 번 출력하고 `.private\reports\`에 저장합니다(예약 작업용).
+`security-watch.exe --once`는 텍스트 리포트를 한 번 출력하고 `.private\reports\`에 저장합니다(예약 작업용). `--demo`는 가짜 데이터로 창을 보여줍니다.
 
 ## 파일
 
@@ -71,8 +71,6 @@ Windows PC와, 이 PC에서 SSH로 관리하는 Linux 서버들을 지켜보는 
   state/<host>.baseline   승인된 기준선
   state/watch_since       기준 시점
   state/<host>.lastrun    마지막 검사 구간 끝 (--once)
-  state/ui.lock, ui.log   실행 중인 대시보드(포트+토큰), 동작 로그
-  ui-profile/             대시보드 창용 Edge 프로필
   reports/report-*.txt    --once 리포트
 ```
 
@@ -80,7 +78,7 @@ exe가 있는 폴더에 `security-watch.conf`가 있으면 그 폴더를 대신 
 
 ## 보안 설계
 
-- 화면은 `127.0.0.1`에서만 제공합니다. 모든 요청에 실행할 때마다 새로 만드는 무작위 토큰과 루프백 `Host` 헤더가 있어야 해서, 다른 프로그램이나 웹페이지가 상태를 읽거나 기준선을 승인할 수 없습니다(CSRF, DNS 리바인딩 방지).
+- 대시보드는 네이티브 창입니다. 웹서버나 열린 포트가 없어서 다른 프로그램이 접근할 통로가 없습니다.
 - 자식 프로세스(`ssh`, PowerShell)는 kill-on-close Job Object 안에서 실행되므로, 프로그램이 강제 종료돼도 남지 않습니다.
 - 원격 스크립트는 로그와 시스템 상태를 읽기만 합니다. `src/probe_linux.sh`, `src/live_linux.sh`에서 확인할 수 있습니다.
 

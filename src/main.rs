@@ -1,18 +1,18 @@
 //! security-watch: security monitor for this PC and your SSH servers.
 //! Double-click: live dashboard window. `--once`: one text report and exit.
-//! Read-only on every host; std only.
+//! Read-only on every host.
 #![windows_subsystem = "windows"]
 
 mod app;
 mod baseline;
 mod config;
 mod eval;
+mod gui;
 mod live;
 mod probe;
 mod report;
 mod runner;
 mod scan;
-mod server;
 mod ui;
 mod win;
 
@@ -38,8 +38,5 @@ fn main() {
         report::run_once(&root, interactive);
         return;
     }
-    if has("--no-window") {
-        win::ensure_console();
-    }
-    ui::run(root, has("--no-window"));
+    ui::run(root, has("--demo"));
 }

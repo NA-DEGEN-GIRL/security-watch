@@ -285,7 +285,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn app() -> App {
-        App::new(PathBuf::from("."), vec![Target { name: "h".into(), kind: Kind::Remote { lan_only: true } }], "t".into(), 0)
+        App::new(PathBuf::from("."), vec![Target { name: "h".into(), kind: Kind::Remote { lan_only: true } }])
     }
 
     #[test]

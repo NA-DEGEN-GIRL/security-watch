@@ -6,6 +6,7 @@ description = "Double-click security check for a Windows PC and its Linux SSH se
 license = "MIT"
 
 [dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
 
 [profile.release]
 opt-level = 3

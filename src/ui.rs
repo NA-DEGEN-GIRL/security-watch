@@ -1,89 +1,15 @@
-//! Dashboard mode: local web UI in an Edge app window, live feeds, periodic full scans.
+//! Dashboard mode: native window, live feeds, periodic full scans.
 
-use crate::app::App;
-use crate::config::{self, Target};
-use crate::{live, scan, server, win};
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use crate::app::{App, Conn, LiveState};
+use crate::config::{self, Kind, Target};
+use crate::eval::{Finding, Level};
+use crate::gui::{self, Gui};
+use crate::{live, scan, win};
+use eframe::egui;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-fn random_token() -> String {
-    let mut s = String::new();
-    for i in 0..2u64 {
-        // RandomState is seeded from the OS RNG for every new instance.
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(i);
-        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-        s.push_str(&format!("{:016x}", h.finish()));
-    }
-    s
-}
-
-fn lock_path(root: &Path) -> PathBuf {
-    root.join("state").join("ui.lock")
-}
-
-/// Small lifecycle log (window/heartbeat decisions) for diagnosing the GUI app.
-fn log(root: &Path, msg: &str) {
-    use std::fs::OpenOptions;
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(root.join("state").join("ui.log")) {
-        let _ = writeln!(f, "{} {msg}", win::now_display());
-    }
-}
-
-/// An already running dashboard (port, token), if it still answers.
-fn running_instance(root: &Path) -> Option<(u16, String)> {
-    let text = std::fs::read_to_string(lock_path(root)).ok()?;
-    let (port, token) = text.trim().split_once(' ')?;
-    let port: u16 = port.parse().ok()?;
-    let mut s = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(500)).ok()?;
-    s.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    write!(s, "GET /api/ping HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Token: {token}\r\nConnection: close\r\n\r\n").ok()?;
-    let mut resp = String::new();
-    let _ = s.read_to_string(&mut resp);
-    resp.starts_with("HTTP/1.1 200").then(|| (port, token.to_string()))
-}
-
-fn edge_path() -> Option<PathBuf> {
-    let mut c = vec![
-        PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-        PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-    ];
-    if let Ok(l) = std::env::var("LOCALAPPDATA") {
-        c.push(Path::new(&l).join(r"Microsoft\Edge\Application\msedge.exe"));
-    }
-    c.into_iter().find(|p| p.is_file())
-}
-
-/// Opens the dashboard as an Edge app window (own profile, so closing the window
-/// ends the Edge process we spawned). Falls back to the default browser.
-fn open_window(root: &Path, port: u16, token: &str) -> Option<Child> {
-    let url = format!("http://127.0.0.1:{port}/?t={token}");
-    if let Some(edge) = edge_path() {
-        let profile = root.join("ui-profile");
-        let spawned = Command::new(edge)
-            .arg(format!("--app={url}"))
-            .arg("--window-size=1440,920")
-            .arg(format!("--user-data-dir={}", profile.display()))
-            .args(["--no-first-run", "--no-default-browser-check", "--disable-sync"])
-            .creation_flags(win::CREATE_BREAKAWAY_FROM_JOB)
-            .spawn();
-        if let Ok(c) = spawned {
-            return Some(c);
-        }
-    }
-    let _ = Command::new("cmd").args(["/c", "start", "", &url]).creation_flags(CREATE_NO_WINDOW).spawn();
-    None
-}
+use std::time::Duration;
 
 fn scanner(app: Arc<App>) {
     loop {
@@ -116,82 +42,91 @@ fn scanner(app: Arc<App>) {
     }
 }
 
-pub fn run(root: PathBuf, no_window: bool) {
-    let (targets, _) = config::load(&root);
-    if let Some((port, token)) = running_instance(&root) {
-        if !no_window {
-            let _ = open_window(&root, port, &token);
-        }
-        return;
+pub fn run(root: PathBuf, demo: bool) {
+    if !win::single_instance("Local\\security-watch-dashboard", gui::TITLE) {
+        return; // the running window was brought to the front
     }
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(l) => l,
-        Err(e) => {
-            win::message_box("security-watch", &format!("로컬 서버를 열지 못했습니다: {e}"));
-            return;
+    let app = if demo {
+        Arc::new(demo_app())
+    } else {
+        let (targets, _) = config::load(&root);
+        let app = Arc::new(App::new(root, targets.clone()));
+        for t in targets {
+            live::start(&app, t);
+        }
+        let a = Arc::clone(&app);
+        thread::spawn(move || scanner(a));
+        app
+    };
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title(gui::TITLE)
+            .with_inner_size([1440.0, 940.0])
+            .with_min_inner_size([960.0, 600.0])
+            .with_icon(Arc::new(gui::icon(64))),
+        ..Default::default()
+    };
+    let gui_app = Arc::clone(&app);
+    if let Err(e) = eframe::run_native(gui::TITLE, options, Box::new(move |cc| Ok(Box::new(Gui::new(cc, gui_app))))) {
+        win::message_box(gui::TITLE, &format!("창을 열지 못했습니다: {e}"));
+    }
+    app.shutdown();
+}
+
+/// Fake hosts and events for screenshots (`--demo`): documentation IPs only.
+fn demo_app() -> App {
+    let t = |name: &str, kind| Target { name: name.into(), kind };
+    let app = App::new(
+        PathBuf::from("."),
+        vec![t("local", Kind::Local), t("web-01", Kind::Remote { lan_only: true }), t("nas-01", Kind::Remote { lan_only: true })],
+    );
+    let now = crate::now_epoch();
+    let f = |level, text: &str, details: &[&str]| Finding { level, text: text.into(), details: details.iter().map(|s| s.to_string()).collect() };
+    let mut g = app.lock();
+    g.watch_since = now - 7200;
+    for (i, h) in g.hosts.iter_mut().enumerate() {
+        h.live = LiveState::Connected;
+        h.last_scan = now - 90 + i as u64 * 10;
+        h.scan_ok = true;
+    }
+    {
+        let h = &mut g.hosts[0];
+        h.hostname = Some("DESKTOP-DEMO".into());
+        h.findings = vec![
+            f(Level::Alert, "공인 IP에서 RDP 접속 214건 (9개 IP)", &["203.0.113.24  ×131", "198.51.100.7  ×41", "203.0.113.88  ×17", "… 외 6개", "RDP가 인터넷에 노출돼 있습니다. 공유기 포트포워딩에서 RDP(3389) 규칙을 확인하세요"]),
+            f(Level::Alert, "공인 IP의 RDP 로그인 실패 52건 (비밀번호 대입 공격)", &["198.51.100.7  ×30", "203.0.113.24  ×22"]),
+            f(Level::Info, "원격 데스크톱(RDP) 켜짐 (NLA 사용)", &[]),
+        ];
+        h.counters.insert("rdp_pub", 214);
+        h.counters.insert("rdp_fail_pub", 52);
+        h.counters.insert("login", 3);
+    }
+    {
+        let h = &mut g.hosts[1];
+        h.hostname = Some("web-01".into());
+        h.findings = vec![f(Level::Info, "내부망 SSH 로그인 42건", &["admin (publickey) @ 192.168.1.20  ×42"])];
+        h.changes = vec![f(Level::Warn, "기준선 대비 변경: 열린 포트", &["+ 새로 생김: tcp 0.0.0.0:8080 (python3)"])];
+        h.counters.insert("login", 42);
+        h.conns = vec![Conn { local: "192.168.1.10:22".into(), peer: "192.168.1.20:51522".into(), proc_name: "sshd".into(), public: false }];
+    }
+    {
+        let h = &mut g.hosts[2];
+        h.hostname = Some("nas-01".into());
+        h.findings = vec![f(Level::Info, "내부망 SSH 로그인 5건", &["backup (publickey) @ 192.168.1.20  ×5"])];
+        h.counters.insert("login", 5);
+        h.conns = vec![Conn { local: "192.168.1.11:22".into(), peer: "192.168.1.20:50110".into(), proc_name: "sshd".into(), public: false }];
+    }
+    let mut ev = |host: &str, level, key: &str, text: &str, public, ago: u64, n: u64| {
+        for k in 0..n {
+            g.push_event(host, level, key.into(), text.into(), public, now - ago - (n - 1 - k) * 2, 600);
         }
     };
-    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
-    let token = random_token();
-    let _ = std::fs::create_dir_all(root.join("state"));
-    let _ = std::fs::write(lock_path(&root), format!("{port} {token}"));
-
-    let app = Arc::new(App::new(root.clone(), targets.clone(), token.clone(), crate::now_epoch()));
-    {
-        let app = Arc::clone(&app);
-        thread::spawn(move || server::serve(app, listener, port));
-    }
-    for t in targets {
-        live::start(&app, t);
-    }
-    {
-        let app = Arc::clone(&app);
-        thread::spawn(move || scanner(app));
-    }
-
-    if no_window {
-        println!("http://127.0.0.1:{port}/?t={token}");
-    }
-    let started = Instant::now();
-    log(&root, &format!("started port={port}"));
-    if !no_window {
-        if let Some(mut edge) = open_window(&root, port, &token) {
-            // The Edge process is NOT the window's lifetime: Edge may relaunch itself
-            // (e.g. to apply an update) and keep the window. Only log it.
-            let root = root.clone();
-            thread::spawn(move || {
-                log(&root, &format!("edge spawned pid={}", edge.id()));
-                let status = edge.wait();
-                log(&root, &format!("edge process exited after {}s: {status:?}", started.elapsed().as_secs()));
-            });
-        }
-    }
-    // Lifetime follows the page: a "pagehide" beacon (window closed or reloading)
-    // followed by silence means closed; a reload polls again within a second.
-    let mut page_seen = false;
-    loop {
-        thread::sleep(Duration::from_secs(2));
-        if no_window {
-            continue;
-        }
-        let (last, closing) = {
-            let g = app.lock();
-            (g.last_poll, g.closing_at)
-        };
-        if !page_seen && last.is_some() {
-            page_seen = true;
-            log(&root, &format!("page connected after {}s", started.elapsed().as_secs()));
-        }
-        let reason = match (last, closing) {
-            (_, Some(c)) if c.elapsed() > Duration::from_secs(10) => Some("window closed"),
-            // Minimized windows may throttle timers to about once a minute.
-            (Some(t), _) if t.elapsed() > Duration::from_secs(180) => Some("page stopped polling"),
-            (None, _) if started.elapsed() > Duration::from_secs(600) => Some("page never connected"),
-            _ => None,
-        };
-        if let Some(r) = reason {
-            log(&root, &format!("{r} -> exit"));
-            app.shutdown();
-        }
-    }
+    ev("web-01", Level::Warn, "f", "SSH 인증 실패 ← 192.168.1.35 (계정: test)", false, 600, 2);
+    ev("nas-01", Level::Info, "fw", "방화벽 차단 ← 198.51.100.200 (UDP/1900)", true, 300, 3);
+    ev("web-01", Level::Info, "l", "SSH 로그인 admin ← 192.168.1.20 [publickey]", false, 12, 42);
+    ev("local", Level::Alert, "rf", "RDP 로그인 실패 ← 198.51.100.7", true, 55, 30);
+    ev("local", Level::Alert, "rc", "공인 IP의 RDP 접속 ← 203.0.113.24 (RDP가 인터넷에 노출됨)", true, 40, 131);
+    drop(g);
+    app
 }

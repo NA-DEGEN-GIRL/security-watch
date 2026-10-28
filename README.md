@@ -11,8 +11,9 @@ accounts, keys, ports and autoruns.
 *Dashboard (demo data; addresses are documentation examples)*
 
 - **Read-only.** It never changes anything on the hosts it checks.
-- **No dependencies.** Rust standard library only, plus `ssh`, PowerShell and Edge, which
-  ship with Windows. Servers need nothing installed; checks run as shell scripts over SSH.
+- **Minimal dependencies.** One crate, `eframe` (egui), for the native window; everything
+  else is the Rust standard library plus `ssh` and PowerShell, which ship with Windows.
+  Servers need nothing installed; checks run as shell scripts over SSH.
 - **Private by default.** Host names, baselines and reports stay in a git-ignored folder.
 
 ## Dashboard
@@ -69,7 +70,9 @@ How fresh the data is:
    host my-server lan      # Host alias from ~/.ssh/config, key-based login
    host my-vps public      # internet-facing: public brute force is only "info"
    ```
-4. Double-click `.private\security-watch.exe`. Closing the window stops the program.
+4. Double-click `.private\security-watch.exe`. It opens one native window with its own icon
+   (pin it to the taskbar like any app). Closing the window stops the program and its
+   `ssh`/PowerShell helpers; starting it again while it runs brings the window back.
 
 Requirements for servers: key-based SSH without a password prompt (`BatchMode`), and read
 access to the journal (`adm` or `systemd-journal` group) or passwordless `sudo`. Without
@@ -77,7 +80,7 @@ journal access the dashboard says so instead of guessing. Without `sudo`, proces
 other users' connections show as "권한 필요" (permission needed).
 
 `security-watch.exe --once` prints a one-shot text report and saves it under
-`.private\reports\` (useful for scheduled tasks).
+`.private\reports\` (useful for scheduled tasks). `--demo` shows the window with fake data.
 
 ## Files
 
@@ -87,8 +90,6 @@ other users' connections show as "권한 필요" (permission needed).
   state/<host>.baseline   accepted baseline
   state/watch_since       reference point
   state/<host>.lastrun    end of the last window (--once)
-  state/ui.lock, ui.log   running dashboard (port + token), lifecycle log
-  ui-profile/             Edge profile used by the dashboard window
   reports/report-*.txt    --once reports
 ```
 
@@ -97,9 +98,8 @@ copied exe works anywhere.
 
 ## Security design
 
-- The UI is served on `127.0.0.1` only. Every request needs a random per-run token and a
-  loopback `Host` header, so other programs and web pages cannot read the state or accept
-  a baseline (CSRF and DNS-rebinding safe).
+- The dashboard is a native window: no web server and no open port for other programs to
+  talk to.
 - All child processes (`ssh`, PowerShell) run in a kill-on-close job object, so nothing is
   left behind even if the program is killed.
 - The remote scripts only read logs and system state; see `src/probe_linux.sh` and

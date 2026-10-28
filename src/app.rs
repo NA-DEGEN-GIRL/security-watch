@@ -1,15 +1,14 @@
 //! Shared dashboard state: per-host scan results, live counters/connections, event feed.
 
 use crate::baseline;
-use crate::config::{Kind, Target};
+use crate::config::Target;
 use crate::eval::{Finding, Level};
-use crate::scan::ScanResult;
+use crate::scan::{self, ScanResult};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
 
 const MAX_EVENTS: usize = 3000;
 
@@ -20,6 +19,7 @@ pub enum LiveState {
     Disconnected,
 }
 
+#[derive(Clone)]
 pub struct Conn {
     pub local: String,
     pub peer: String,
@@ -29,8 +29,6 @@ pub struct Conn {
 
 pub struct Event {
     pub id: u64,
-    /// Bumped on every update so the UI can fetch only what changed.
-    pub seq: u64,
     pub ts: u64,
     pub last_ts: u64,
     pub count: u64,
@@ -57,16 +55,18 @@ pub struct HostState {
     pub conns_ts: u64,
 }
 
+impl HostState {
+    pub fn counter(&self, keys: &[&str]) -> u64 {
+        keys.iter().map(|k| self.counters.get(k).copied().unwrap_or(0)).sum()
+    }
+}
+
 pub struct Inner {
     pub hosts: Vec<HostState>,
     pub events: VecDeque<Event>,
     next_id: u64,
-    seq: u64,
     pub scan_minutes: u64,
     pub force_scan: bool,
-    pub last_poll: Option<Instant>,
-    /// Set by the page's "pagehide" beacon; cleared by the next poll (reload).
-    pub closing_at: Option<Instant>,
     /// Reference point for log-based findings (0 = none).
     pub watch_since: u64,
 }
@@ -74,14 +74,12 @@ pub struct Inner {
 pub struct App {
     pub inner: Mutex<Inner>,
     pub root: PathBuf,
-    pub token: String,
     pub children: Mutex<Vec<Child>>,
     pub stopping: AtomicBool,
-    pub started: u64,
 }
 
 impl App {
-    pub fn new(root: PathBuf, targets: Vec<Target>, token: String, started: u64) -> App {
+    pub fn new(root: PathBuf, targets: Vec<Target>) -> App {
         let hosts = targets
             .into_iter()
             .map(|target| HostState {
@@ -105,18 +103,13 @@ impl App {
                 hosts,
                 events: VecDeque::new(),
                 next_id: 1,
-                seq: 0,
                 scan_minutes: 5,
                 force_scan: false,
-                last_poll: None,
-                closing_at: None,
-                watch_since: crate::scan::load_watch_since(&root),
+                watch_since: scan::load_watch_since(&root),
             }),
             root,
-            token,
             children: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
-            started,
         }
     }
 
@@ -134,7 +127,6 @@ impl App {
         id
     }
 
-    /// Reaps a finished child; returns false if it was not tracked.
     pub fn forget_child(&self, pid: u32) {
         let mut v = self.children.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = v.iter().position(|c| c.id() == pid) {
@@ -144,13 +136,44 @@ impl App {
         }
     }
 
-    pub fn shutdown(&self) -> ! {
+    pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::Relaxed);
         for c in self.children.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
             let _ = c.kill();
         }
-        let _ = std::fs::remove_file(self.root.join("state").join("ui.lock"));
-        std::process::exit(0);
+    }
+
+    // ----- actions triggered from the window -----
+
+    pub fn request_scan(&self) {
+        self.lock().force_scan = true;
+    }
+
+    pub fn set_scan_minutes(&self, minutes: u64) {
+        self.lock().scan_minutes = minutes.clamp(1, 1440);
+    }
+
+    /// Hide log history older than now from findings and rescan.
+    pub fn set_watch_since_now(&self) {
+        let now = crate::now_epoch();
+        scan::save_watch_since(&self.root, now);
+        let mut g = self.lock();
+        g.watch_since = now;
+        g.force_scan = true;
+        g.push_event("", Level::Info, String::new(), "기준 시점을 지금으로 바꿨습니다. 이전 로그 기록은 점검 결과에서 제외됩니다".into(), false, now, 0);
+    }
+
+    /// Save the host's current state as the new baseline.
+    pub fn accept_baseline(&self, name: &str) -> Result<(), String> {
+        let now = crate::now_epoch();
+        let mut g = self.lock();
+        let h = g.host_mut(name).ok_or("대상을 찾을 수 없습니다")?;
+        let items = h.items.as_ref().ok_or("저장할 검사 결과가 없습니다")?;
+        baseline::save(&scan::baseline_path(&self.root, &h.target), items).map_err(|e| format!("저장 실패: {e}"))?;
+        h.changes.clear();
+        let title = h.target.title();
+        g.push_event(name, Level::Info, String::new(), format!("{title}: 현재 상태를 새 기준선으로 승인했습니다"), false, now, 0);
+        Ok(())
     }
 }
 
@@ -168,8 +191,6 @@ impl Inner {
     /// Adds an event, or folds it into a recent one with the same key
     /// (repeated logins/attempts from the same source become one "×N" row).
     pub fn push_event(&mut self, host: &str, level: Level, key: String, text: String, public: bool, ts: u64, fold_secs: u64) {
-        self.seq += 1;
-        let seq = self.seq;
         if fold_secs > 0 {
             if let Some(e) = self
                 .events
@@ -181,13 +202,12 @@ impl Inner {
                 e.count += 1;
                 e.last_ts = e.last_ts.max(ts);
                 e.level = e.level.max(level);
-                e.seq = seq;
                 return;
             }
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.events.push_back(Event { id, seq, ts, last_ts: ts, count: 1, host: host.to_string(), level, text, public, key });
+        self.events.push_back(Event { id, ts, last_ts: ts, count: 1, host: host.to_string(), level, text, public, key });
         while self.events.len() > MAX_EVENTS {
             self.events.pop_front();
         }
@@ -208,146 +228,28 @@ impl Inner {
             }
         }
     }
-}
 
-// ---------- JSON (hand-written; no serde) ----------
-
-pub fn js(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
-    o.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"),
-            '\r' => o.push_str("\\r"),
-            '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
-            c => o.push(c),
+    /// Worst of scan findings and live events in the last hour (Info counts as OK).
+    pub fn host_level(&self, h: &HostState, now: u64) -> Level {
+        let recent = now.saturating_sub(3600);
+        let live = self.events.iter().filter(|e| e.host == h.target.name && e.last_ts >= recent).map(|e| e.level).max().unwrap_or(Level::Ok);
+        let scan = h.findings.iter().chain(&h.changes).map(|f| f.level).max().unwrap_or(Level::Ok);
+        match live.max(scan) {
+            Level::Info => Level::Ok,
+            l => l,
         }
     }
-    o.push('"');
-    o
-}
-
-fn level_key(l: Level) -> &'static str {
-    match l {
-        Level::Ok => "ok",
-        Level::Info => "info",
-        Level::Warn => "warn",
-        Level::Alert => "alert",
-    }
-}
-
-fn findings_json(fs: &[Finding]) -> String {
-    let mut v: Vec<&Finding> = fs.iter().collect();
-    v.sort_by(|a, b| b.level.cmp(&a.level));
-    let items: Vec<String> = v
-        .iter()
-        .map(|f| {
-            let d: Vec<String> = f.details.iter().map(|x| js(x)).collect();
-            format!("{{\"level\":\"{}\",\"text\":{},\"details\":[{}]}}", level_key(f.level), js(&f.text), d.join(","))
-        })
-        .collect();
-    format!("[{}]", items.join(","))
-}
-
-pub fn state_json(inner: &Inner, since_seq: u64, now: u64, started: u64) -> String {
-    let recent = now.saturating_sub(3600);
-    let hosts: Vec<String> = inner
-        .hosts
-        .iter()
-        .map(|h| {
-            let live_alert = inner
-                .events
-                .iter()
-                .filter(|e| e.host == h.target.name && e.last_ts >= recent)
-                .map(|e| e.level)
-                .max()
-                .unwrap_or(Level::Ok);
-            let scan_level = h.findings.iter().chain(&h.changes).map(|f| f.level).max().unwrap_or(Level::Ok);
-            let mut level = live_alert.max(scan_level);
-            if level == Level::Info {
-                level = Level::Ok;
-            }
-            let counters: Vec<String> = h.counters.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
-            let conns: Vec<String> = h
-                .conns
-                .iter()
-                .map(|c| format!("{{\"local\":{},\"peer\":{},\"proc\":{},\"public\":{}}}", js(&c.local), js(&c.peer), js(&c.proc_name), c.public))
-                .collect();
-            let (kind, lan) = match h.target.kind {
-                Kind::Local => ("local", true),
-                Kind::Remote { lan_only } => ("remote", lan_only),
-            };
-            let live = match h.live {
-                LiveState::Connecting => "connecting",
-                LiveState::Connected => "connected",
-                LiveState::Disconnected => "disconnected",
-            };
-            format!(
-                concat!(
-                    "{{\"name\":{},\"title\":{},\"hostname\":{},\"kind\":\"{}\",\"lan\":{},\"live\":\"{}\",\"live_error\":{},",
-                    "\"scanning\":{},\"last_scan\":{},\"scan_ok\":{},\"level\":\"{}\",\"findings\":{},\"changes\":{},",
-                    "\"counters\":{{{}}},\"conns\":[{}],\"conns_ts\":{}}}"
-                ),
-                js(&h.target.name),
-                js(&h.target.title()),
-                js(h.hostname.as_deref().unwrap_or("")),
-                kind,
-                lan,
-                live,
-                js(&h.live_error),
-                h.scanning,
-                h.last_scan,
-                h.scan_ok,
-                level_key(level),
-                findings_json(&h.findings),
-                findings_json(&h.changes),
-                counters.join(","),
-                conns.join(","),
-                h.conns_ts
-            )
-        })
-        .collect();
-
-    let mut evs: Vec<&Event> = inner.events.iter().filter(|e| e.seq > since_seq).collect();
-    if since_seq == 0 && evs.len() > 400 {
-        evs = evs.split_off(evs.len() - 400);
-    }
-    let events: Vec<String> = evs
-        .iter()
-        .map(|e| {
-            format!(
-                "{{\"id\":{},\"seq\":{},\"ts\":{},\"last_ts\":{},\"count\":{},\"host\":{},\"level\":\"{}\",\"text\":{},\"public\":{}}}",
-                e.id, e.seq, e.ts, e.last_ts, e.count, js(&e.host), level_key(e.level), js(&e.text), e.public
-            )
-        })
-        .collect();
-    let next_scan = inner.hosts.iter().filter(|h| h.last_scan > 0).map(|h| h.last_scan).min().map(|t| t + inner.scan_minutes * 60).unwrap_or(0);
-    format!(
-        "{{\"now\":{now},\"started\":{started},\"seq\":{},\"scan_minutes\":{},\"watch_since\":{},\"next_scan\":{next_scan},\"hosts\":[{}],\"events\":[{}]}}",
-        inner.seq,
-        inner.scan_minutes,
-        inner.watch_since,
-        hosts.join(","),
-        events.join(",")
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn json_escapes_control_and_quotes() {
-        assert_eq!(js("a\"b\\c\n\u{1}"), "\"a\\\"b\\\\c\\n\\u0001\"");
-    }
+    use crate::config::Kind;
 
     #[test]
     fn repeated_events_are_folded() {
         let t = Target { name: "h".into(), kind: Kind::Local };
-        let app = App::new(PathBuf::from("."), vec![t], "x".into(), 0);
+        let app = App::new(PathBuf::from("."), vec![t]);
         let mut g = app.lock();
         g.push_event("h", Level::Info, "k".into(), "login".into(), false, 100, 600);
         g.push_event("h", Level::Warn, "k".into(), "login".into(), false, 200, 600);
