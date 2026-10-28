@@ -65,6 +65,8 @@ pub struct Inner {
     pub scan_minutes: u64,
     pub force_scan: bool,
     pub last_poll: Option<Instant>,
+    /// Set by the page's "pagehide" beacon; cleared by the next poll (reload).
+    pub closing_at: Option<Instant>,
     /// Reference point for log-based findings (0 = none).
     pub watch_since: u64,
 }
@@ -107,6 +109,7 @@ impl App {
                 scan_minutes: 5,
                 force_scan: false,
                 last_poll: None,
+                closing_at: None,
                 watch_since: crate::scan::load_watch_since(&root),
             }),
             root,

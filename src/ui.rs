@@ -156,27 +156,41 @@ pub fn run(root: PathBuf, no_window: bool) {
     log(&root, &format!("started port={port}"));
     if !no_window {
         if let Some(mut edge) = open_window(&root, port, &token) {
-            log(&root, &format!("edge spawned pid={}", edge.id()));
-            let status = edge.wait();
-            log(&root, &format!("edge exited after {}s: {status:?}", started.elapsed().as_secs()));
-            // A quick exit means Edge handed the window to an already running
-            // instance of this profile; then fall back to the heartbeat below.
-            if started.elapsed() > Duration::from_secs(5) {
-                log(&root, "window closed -> exit");
-                app.shutdown();
-            }
+            // The Edge process is NOT the window's lifetime: Edge may relaunch itself
+            // (e.g. to apply an update) and keep the window. Only log it.
+            let root = root.clone();
+            thread::spawn(move || {
+                log(&root, &format!("edge spawned pid={}", edge.id()));
+                let status = edge.wait();
+                log(&root, &format!("edge process exited after {}s: {status:?}", started.elapsed().as_secs()));
+            });
         }
     }
-    // Heartbeat: quit when the page stops polling (window closed).
+    // Lifetime follows the page: a "pagehide" beacon (window closed or reloading)
+    // followed by silence means closed; a reload polls again within a second.
+    let mut page_seen = false;
     loop {
-        thread::sleep(Duration::from_secs(5));
-        let last = app.lock().last_poll;
-        let idle = match last {
-            Some(t) => t.elapsed() > Duration::from_secs(180),
-            None => started.elapsed() > Duration::from_secs(600),
+        thread::sleep(Duration::from_secs(2));
+        if no_window {
+            continue;
+        }
+        let (last, closing) = {
+            let g = app.lock();
+            (g.last_poll, g.closing_at)
         };
-        if idle && !no_window {
-            log(&root, "no polling from the page -> exit");
+        if !page_seen && last.is_some() {
+            page_seen = true;
+            log(&root, &format!("page connected after {}s", started.elapsed().as_secs()));
+        }
+        let reason = match (last, closing) {
+            (_, Some(c)) if c.elapsed() > Duration::from_secs(10) => Some("window closed"),
+            // Minimized windows may throttle timers to about once a minute.
+            (Some(t), _) if t.elapsed() > Duration::from_secs(180) => Some("page stopped polling"),
+            (None, _) if started.elapsed() > Duration::from_secs(600) => Some("page never connected"),
+            _ => None,
+        };
+        if let Some(r) = reason {
+            log(&root, &format!("{r} -> exit"));
             app.shutdown();
         }
     }

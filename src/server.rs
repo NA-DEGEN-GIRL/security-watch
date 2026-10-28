@@ -95,7 +95,10 @@ fn handle(app: &App, mut s: TcpStream, port: u16) -> std::io::Result<()> {
     if !req.path.starts_with("/api/") {
         return respond(&mut s, "404 Not Found", text, b"not found");
     }
-    if req.header("x-token") != Some(app.token.as_str()) {
+    // sendBeacon cannot set headers, so the close beacon carries the token in the query.
+    let token_ok = req.header("x-token") == Some(app.token.as_str())
+        || (req.path == "/api/bye" && req.param("t").as_deref() == Some(app.token.as_str()));
+    if !token_ok {
         return respond(&mut s, "403 Forbidden", text, b"forbidden");
     }
     let now = crate::now_epoch();
@@ -106,9 +109,14 @@ fn handle(app: &App, mut s: TcpStream, port: u16) -> std::io::Result<()> {
             let body = {
                 let mut g = app.lock();
                 g.last_poll = Some(Instant::now());
+                g.closing_at = None;
                 state_json(&g, since, now, app.started)
             };
             respond(&mut s, "200 OK", "application/json; charset=utf-8", body.as_bytes())
+        }
+        ("POST", "/api/bye") => {
+            app.lock().closing_at = Some(Instant::now());
+            respond(&mut s, "200 OK", text, b"ok")
         }
         ("POST", "/api/scan") => {
             app.lock().force_scan = true;
@@ -179,9 +187,26 @@ fn percent_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A syntax error in the page script silently kills the whole dashboard,
+    /// so check it with `node --check` when Node is installed.
+    #[test]
+    fn page_script_parses() {
+        let page = super::PAGE;
+        let start = page.find("<script>").expect("script start") + "<script>".len();
+        let end = page.rfind("</script>").expect("script end");
+        let path = std::env::temp_dir().join(format!("security-watch-ui-{}.js", std::process::id()));
+        std::fs::write(&path, &page[start..end]).unwrap();
+        let out = std::process::Command::new("node").arg("--check").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        match out {
+            Ok(o) => assert!(o.status.success(), "ui.html script: {}", String::from_utf8_lossy(&o.stderr)),
+            Err(_) => eprintln!("node not found; skipped page script check"),
+        }
+    }
+
     #[test]
     fn decodes_percent_and_plus() {
-        assert_eq!(super::percent_decode("ubuntu-server"), "ubuntu-server");
+        assert_eq!(super::percent_decode("my-server"), "my-server");
         assert_eq!(super::percent_decode("a%20b+c%2"), "a b c%2");
     }
 }

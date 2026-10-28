@@ -312,11 +312,11 @@ document.querySelectorAll('.chip').forEach(b => b.onclick = () => {
 });
 $('scanbtn').onclick = async () => { $('scanbtn').disabled = true; try { await api('/api/scan', 'POST'); } catch (e) {} };
 $('sincebtn').onclick = async () => {
-  if (!confirm('지금 시각을 기준 시점으로 정할까요?
-이전 로그 기록(이미 조치한 과거 공격 등)은 점검 결과에서 빠지고, 바로 전체 검사를 다시 합니다.
-(기준선 비교와 실시간 이벤트는 그대로입니다)')) return;
+  if (!confirm('지금 시각을 기준 시점으로 정할까요?\n이전 로그 기록(이미 조치한 과거 공격 등)은 점검 결과에서 빠지고, 바로 전체 검사를 다시 합니다.\n(기준선 비교와 실시간 이벤트는 그대로입니다)')) return;
   try { await api('/api/watch-since', 'POST'); } catch (e) { alert('실패: ' + e.message); }
 };
+// Tell the program when the window goes away; a reload polls again right after.
+addEventListener('pagehide', () => navigator.sendBeacon('/api/bye?t=' + TOKEN));
 $('every').onchange = async e => { try { await api('/api/settings?scan_minutes=' + e.target.value, 'POST'); } catch (err) {} };
 poll();
 </script>
