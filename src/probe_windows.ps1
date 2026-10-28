@@ -38,7 +38,11 @@ foreach ($k in $runKeys) {
     $p = Get-ItemProperty -Path $k
     if (-not $p) { continue }
     $short = ($k -replace '\\Software\\(WOW6432Node\\)?Microsoft\\Windows\\CurrentVersion\\', '\')
-    $p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
+    # Skip Microsoft updaters' one-shot post-update cleanup (e.g. msedge_cleanup_{GUID}
+    # -> ...\Microsoft\<Edge|Copilot|...>\Application\<ver>\Installer\setup.exe).
+    $p.PSObject.Properties | Where-Object {
+        $_.Name -notlike 'PS*' -and -not ($_.Name -like '*_cleanup_*' -and [string]$_.Value -match '\\Microsoft\\[^\\]+\\Application\\[\d.]+\\Installer\\setup\.exe')
+    } | ForEach-Object {
         $v = [string]$_.Value
         if ($v.Length -gt 90) { $v = $v.Substring(0, 90) }
         Out ("AUTORUN {0}\{1} = {2}" -f $short, $_.Name, $v)

@@ -7,6 +7,9 @@ Double-click it and a dashboard window shows intrusion traces and risky exposure
 RDP/SSH reachable from the internet, logins from public IPs, password-guessing, new
 accounts, keys, ports and autoruns.
 
+![Dashboard (demo data; addresses are documentation examples)](docs/dashboard.png)
+*Dashboard (demo data; addresses are documentation examples)*
+
 - **Read-only.** It never changes anything on the hosts it checks.
 - **No dependencies.** Rust standard library only, plus `ssh`, PowerShell and Edge, which
   ship with Windows. Servers need nothing installed; checks run as shell scripts over SSH.
