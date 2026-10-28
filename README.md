@@ -1,9 +1,29 @@
 # security-watch
 
-Double-click security check for a Windows PC and the Linux servers it manages over SSH.
-It looks for intrusion traces and risky exposure, prints a colored summary, and saves a
-text report. It never changes anything on the checked hosts. No external crates; only the
-Rust standard library plus `ssh` and PowerShell, which ship with Windows.
+Security monitor for a Windows PC and the Linux servers it manages over SSH.
+Double-click it and a dashboard window shows intrusion traces and risky exposure, live.
+It never changes anything on the checked hosts. No external crates; only the Rust
+standard library plus `ssh`, PowerShell and Edge, which ship with Windows.
+
+## Dashboard
+
+- **Live feed (seconds):** one long-lived `ssh` stream per server follows SSH, sudo and
+  firewall events from the journal as they happen; this PC is polled every 5 s for RDP
+  and logon events. Inbound connections to listening ports are refreshed every 5 s and
+  a public IP showing up there raises an event. Repeats from one source fold into "×N".
+- **Full scans (minutes):** the heavier checks below run every 5 minutes (1–60, set in
+  the window) or on demand, over the last 24 h.
+- **Reference point:** "기준 시점을 지금으로" hides log entries older than now, e.g. after
+  you fixed an exposure, so already-handled attacks stop showing up.
+- **Baseline:** differences from the accepted baseline are listed per host with an
+  "accept" button.
+
+The window is an Edge app window on a private profile; closing it stops the program.
+The UI is served on `127.0.0.1` only and every request must carry a random per-run token
+and a loopback `Host` header, so other programs or web pages cannot read or change it.
+All child processes run in a kill-on-close job object and die with the program.
+
+`security-watch.exe --once` keeps the original one-shot text report (for scheduled tasks).
 
 ## What it checks
 
@@ -43,7 +63,7 @@ added, removed or modified, and ask whether to accept the changes as the new bas
    host my-server lan      # ~/.ssh/config Host alias, key-based login (BatchMode)
    host my-vps public      # internet-facing host: public brute force is only "info"
    ```
-4. Double-click `.private\security-watch.exe` whenever you want a check.
+4. Double-click `.private\security-watch.exe` to open the dashboard.
 
 Remote hosts need key-based SSH without a password prompt. Reading SSH/firewall logs on
 the server needs journal access (`adm` or `systemd-journal` group) or passwordless `sudo`;
@@ -58,8 +78,11 @@ Everything personal (host aliases, baselines, reports) lives next to the exe in 
 .private/
   security-watch.conf
   state/<host>.baseline   accepted baseline
-  state/<host>.lastrun    end of the last checked window
-  reports/report-*.txt    one report per run
+  state/<host>.lastrun    end of the last checked window (--once)
+  state/watch_since       reference point set from the dashboard
+  state/ui.lock, ui.log   running dashboard (port + token), lifecycle log
+  ui-profile/             Edge profile used for the dashboard window
+  reports/report-*.txt    one report per --once run
 ```
 
 If the exe's own folder contains `security-watch.conf`, that folder is used instead, so a

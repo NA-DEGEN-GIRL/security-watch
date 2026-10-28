@@ -53,7 +53,8 @@ if [ -s /etc/ld.so.preload ]; then echo "PRELOAD $(tr '\n' ' ' < /etc/ld.so.prel
 # --- suspicious executables ---
 R 'for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in /tmp/*|/var/tmp/*|/dev/shm/*) echo "TMPEXE ${p#/proc/} $e";; esac; done' | head -10
 # new files that are really executable (ELF binary or #! script), not just +x data files
-R 'find /tmp /var/tmp /dev/shm -xdev -type f -perm -u+x -newermt @'"$SINCE"' -print0 2>/dev/null | while IFS= read -r -d "" f; do case "$(head -c 2 "$f" | od -An -tx1 | tr -d " \n")" in 7f45|2321) echo "TMPFILE $f";; esac; done' | head -10
+# (git hook samples and pytest scratch repos are routine developer noise)
+R 'find /tmp /var/tmp /dev/shm -xdev -type f -perm -u+x -newermt @'"$SINCE"' ! -path "*/.git/*" ! -path "/tmp/pytest-of-*" -print0 2>/dev/null | while IFS= read -r -d "" f; do case "$(head -c 2 "$f" | od -An -tx1 | tr -d " \n")" in 7f45|2321) echo "TMPFILE $f";; esac; done' | head -10
 
 # --- persistence: services, timers, cron ---
 for f in /etc/systemd/system/*.service /etc/systemd/system/*.timer; do [ -f "$f" ] && echo "UNIT system ${f##*/}"; done

@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct Output {
-    pub success: bool,
     pub stdout: String,
     pub stderr: String,
 }
@@ -40,9 +39,9 @@ pub fn run(mut cmd: Command, stdin_data: Option<Vec<u8>>, timeout: Duration) -> 
     });
 
     let start = Instant::now();
-    let status = loop {
+    loop {
         match child.try_wait() {
-            Ok(Some(s)) => break s,
+            Ok(Some(_)) => break,
             Ok(None) if start.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -51,9 +50,8 @@ pub fn run(mut cmd: Command, stdin_data: Option<Vec<u8>>, timeout: Duration) -> 
             Ok(None) => thread::sleep(Duration::from_millis(100)),
             Err(e) => return Err(format!("대기 실패: {e}")),
         }
-    };
+    }
     Ok(Output {
-        success: status.success(),
         stdout: String::from_utf8_lossy(&out_t.join().unwrap_or_default()).into_owned(),
         stderr: String::from_utf8_lossy(&err_t.join().unwrap_or_default()).into_owned(),
     })
@@ -80,10 +78,15 @@ pub fn probe_remote(host: &str, since: u64) -> Result<Output, String> {
 /// Runs the PowerShell probe on this PC (passed as -EncodedCommand: no temp files).
 pub fn probe_local(since: u64) -> Result<Output, String> {
     let script = WINDOWS_PROBE.replace("__SINCE__", &since.to_string());
-    let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
     let mut cmd = Command::new("powershell.exe");
-    cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &base64(&utf16)]);
+    cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &encode_ps(&script)]);
     run(cmd, None, Duration::from_secs(180))
+}
+
+/// PowerShell `-EncodedCommand` form: base64 of UTF-16LE.
+pub fn encode_ps(script: &str) -> String {
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    base64(&utf16)
 }
 
 fn base64(data: &[u8]) -> String {

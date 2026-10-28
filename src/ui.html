@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>security-watch</title>
+<style>
+:root {
+  --bg: #0d1117; --panel: #151b23; --panel2: #1b222c; --line: #2a3340; --text: #e6edf3; --muted: #8b97a6;
+  --ok: #3fb950; --info: #58a6ff; --warn: #d29922; --alert: #f85149;
+  --ok-bg: rgba(63,185,80,.12); --info-bg: rgba(88,166,255,.12); --warn-bg: rgba(210,153,34,.15); --alert-bg: rgba(248,81,73,.15);
+  --radius: 10px; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f7fa; --panel: #ffffff; --panel2: #f0f3f7; --line: #d8dee6; --text: #1f2328; --muted: #5d6875;
+    --ok: #1a7f37; --info: #0969da; --warn: #9a6700; --alert: #cf222e;
+    --ok-bg: #dafbe1; --info-bg: #ddf4ff; --warn-bg: #fff8c5; --alert-bg: #ffebe9;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI", "Malgun Gothic", system-ui, sans-serif; }
+button, select { font: inherit; color: inherit; }
+header {
+  position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.brand { font-weight: 700; font-size: 16px; letter-spacing: .2px; display: flex; align-items: center; gap: 8px; }
+.brand svg { width: 20px; height: 20px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-weight: 600; font-size: 13px; }
+.pill.lv-ok, .tag.lv-ok { color: var(--ok); background: var(--ok-bg); } .pill.lv-info, .tag.lv-info { color: var(--info); background: var(--info-bg); }
+.pill.lv-warn, .tag.lv-warn { color: var(--warn); background: var(--warn-bg); } .pill.lv-alert, .tag.lv-alert { color: var(--alert); background: var(--alert-bg); }
+.spacer { flex: 1; }
+.meta { color: var(--muted); font-size: 13px; }
+.ctl { display: flex; align-items: center; gap: 8px; }
+select, .btn {
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer;
+}
+.btn.primary { background: var(--info); border-color: var(--info); color: #fff; font-weight: 600; }
+.btn:disabled { opacity: .55; cursor: default; }
+.btn:focus-visible, select:focus-visible, .card:focus-visible, .chip:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+main { padding: 18px 20px 28px; display: grid; gap: 16px; max-width: 1600px; margin: 0 auto; }
+.banner { display: none; padding: 10px 14px; border-radius: var(--radius); background: var(--alert-bg); color: var(--alert); font-weight: 600; }
+.hosts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px;
+  border-top: 3px solid var(--line); cursor: pointer; transition: border-color .15s, transform .15s;
+}
+.card:hover { transform: translateY(-1px); }
+.card.sel { box-shadow: 0 0 0 2px var(--info); }
+.card.c-ok { border-top-color: var(--ok); } .card.c-warn { border-top-color: var(--warn); } .card.c-alert { border-top-color: var(--alert); }
+.card h3 { margin: 0; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+.card h3 .sub { color: var(--muted); font-weight: 400; font-size: 13px; }
+.card .top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.live { margin-top: 4px; font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.on { background: var(--ok); box-shadow: 0 0 0 0 var(--ok); animation: pulse 2s infinite; }
+.dot.wait { background: var(--warn); } .dot.off { background: var(--alert); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(63,185,80,.6); } 70% { box-shadow: 0 0 0 7px rgba(63,185,80,0); } 100% { box-shadow: 0 0 0 0 rgba(63,185,80,0); } }
+@media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } .card { transition: none; } }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+.stat { background: var(--panel2); border-radius: 8px; padding: 7px 9px; }
+.stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 11.5px; color: var(--muted); }
+.stat.hot b { color: var(--alert); }
+.card .foot { margin-top: 10px; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
+.phead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.phead h2 { margin: 0; font-size: 15px; }
+.phead .hint { color: var(--muted); font-size: 12.5px; }
+.chips { display: flex; gap: 6px; }
+.chip { border: 1px solid var(--line); background: var(--panel2); border-radius: 999px; padding: 2px 10px; font-size: 12.5px; cursor: pointer; }
+.chip.on { background: var(--info); border-color: var(--info); color: #fff; }
+.scroll { max-height: 560px; overflow: auto; padding-right: 4px; }
+.hostblock + .hostblock { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.hostblock h4 { margin: 0 0 8px; font-size: 13.5px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.f { display: grid; grid-template-columns: 46px 1fr; gap: 8px; padding: 6px 0; }
+.f + .f { border-top: 1px solid var(--line); }
+.tag { font-size: 11.5px; font-weight: 700; text-align: center; border-radius: 6px; padding: 1px 0; height: fit-content; }
+.f ul { margin: 4px 0 0; padding-left: 16px; color: var(--muted); font-size: 12.5px; }
+.f ul li { word-break: break-all; }
+.empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+.ev { display: grid; grid-template-columns: 64px 46px 1fr; gap: 8px; padding: 6px 2px; align-items: baseline; }
+.ev + .ev { border-top: 1px solid var(--line); }
+.ev .t { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ev .h { color: var(--muted); font-size: 12px; margin-right: 6px; }
+.ev .n { font-size: 12px; color: var(--muted); margin-left: 6px; }
+.ev.fresh { animation: flash 1.6s ease-out; }
+@keyframes flash { from { background: var(--info-bg); } to { background: transparent; } }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+td.mono { font-family: var(--mono); font-size: 12.5px; }
+.pub { color: var(--alert); font-weight: 600; }
+.spin { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--info); border-radius: 50%; display: inline-block; animation: rot .8s linear infinite; vertical-align: -2px; }
+@keyframes rot { to { transform: rotate(360deg); } }
+.err { color: var(--alert); font-size: 12px; word-break: break-all; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
+    security-watch
+  </div>
+  <span id="overall" class="pill lv-ok">상태 확인 중</span>
+  <div class="spacer"></div>
+  <div class="meta" id="scanmeta"></div>
+  <div class="ctl">
+    <span class="meta" id="sincemeta"></span>
+    <button class="btn" id="sincebtn" title="이 시각 이전의 로그 기록(이미 조치한 과거 공격 등)은 점검 결과에서 제외합니다">기준 시점을 지금으로</button>
+  </div>
+  <div class="ctl">
+    <label class="meta" for="every">전체 검사</label>
+    <select id="every" title="계정·키·포트 등 무거운 검사 주기">
+      <option value="1">1분마다</option><option value="5">5분마다</option><option value="15">15분마다</option><option value="30">30분마다</option><option value="60">1시간마다</option>
+    </select>
+    <button class="btn primary" id="scanbtn">지금 전체 검사</button>
+  </div>
+</header>
+<main>
+  <div class="banner" id="banner">프로그램과의 연결이 끊어졌습니다. 다시 연결하는 중...</div>
+  <section class="hosts" id="hosts" aria-label="점검 대상"></section>
+  <div class="grid2">
+    <section class="panel">
+      <div class="phead"><h2>점검 결과</h2><span class="hint" id="findhint"></span></div>
+      <div class="scroll" id="findings"></div>
+    </section>
+    <section class="panel">
+      <div class="phead">
+        <h2>실시간 이벤트</h2>
+        <div class="chips" role="group" aria-label="이벤트 필터">
+          <button class="chip on" data-f="important">중요만</button>
+          <button class="chip" data-f="all">전체</button>
+        </div>
+      </div>
+      <div class="scroll" id="feed" aria-live="polite"></div>
+    </section>
+  </div>
+  <section class="panel">
+    <div class="phead"><h2>지금 들어와 있는 연결</h2><span class="hint">열려 있는 포트로 들어온 연결 · 5초마다 갱신 · 빨간색은 공인(외부) IP</span></div>
+    <div id="conns"></div>
+  </section>
+</main>
+<script>
+const TOKEN = '__TOKEN__';
+const LV = { ok: '정상', info: '정보', warn: '주의', alert: '위험' };
+const RANK = { ok: 0, info: 1, warn: 2, alert: 3 };
+const events = new Map();
+let seq = 0, state = null, selected = null, filter = 'important', lastSeen = 0, firstLoad = true;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const $ = id => document.getElementById(id);
+
+function clock(ts) {
+  const d = new Date(ts * 1000), n = new Date(), p = x => String(x).padStart(2, '0');
+  const t = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return d.toDateString() === n.toDateString() ? `${t}:${p(d.getSeconds())}` : `${d.getMonth() + 1}/${d.getDate()} ${t}`;
+}
+function ago(ts, now) {
+  const s = Math.max(0, now - ts);
+  if (s < 60) return `${s}초 전`;
+  if (s < 3600) return `${Math.floor(s / 60)}분 전`;
+  return `${Math.floor(s / 3600)}시간 전`;
+}
+function until(ts, now) {
+  const s = Math.max(0, ts - now);
+  return s < 60 ? `${s}초 후` : `${Math.floor(s / 60)}분 ${s % 60}초 후`;
+}
+
+async function api(path, method = 'GET') {
+  const r = await fetch(path, { method, headers: { 'X-Token': TOKEN }, cache: 'no-store' });
+  if (!r.ok) throw new Error(await r.text());
+  return (r.headers.get('content-type') || '').includes('json') ? r.json() : r.text();
+}
+
+async function poll() {
+  try {
+    const s = await api('/api/state?since=' + seq);
+    state = s;
+    for (const e of s.events) { events.set(e.id, e); seq = Math.max(seq, e.seq); }
+    if (events.size > 2000) {
+      const keep = [...events.values()].sort((a, b) => b.last_ts - a.last_ts).slice(0, 1500);
+      events.clear(); keep.forEach(e => events.set(e.id, e));
+    }
+    $('banner').style.display = 'none';
+    render();
+  } catch (e) {
+    $('banner').style.display = 'block';
+  }
+  setTimeout(poll, 2000);
+}
+
+function hostLabel(h) {
+  return h.hostname && h.hostname !== h.title ? `${esc(h.title)} <span class="sub">${esc(h.hostname)}</span>` : esc(h.title);
+}
+
+function renderHeader(s) {
+  const worst = s.hosts.reduce((m, h) => RANK[h.level] > RANK[m] ? h.level : m, 'ok');
+  const o = $('overall');
+  o.className = 'pill lv-' + worst;
+  o.textContent = worst === 'ok' ? '전체 정상' : worst === 'alert' ? '위험 항목 있음' : '주의 항목 있음';
+  const scanning = s.hosts.some(h => h.scanning);
+  const last = Math.max(0, ...s.hosts.map(h => h.last_scan));
+  $('scanmeta').innerHTML = scanning ? '<span class="spin"></span> 전체 검사 중...'
+    : last ? `마지막 전체 검사 ${ago(last, s.now)} · 다음 ${s.next_scan ? until(s.next_scan, s.now) : '-'}` : '첫 검사 준비 중';
+  $('scanbtn').disabled = scanning;
+  $('sincemeta').textContent = s.watch_since ? `기준 시점 ${clock(s.watch_since)} 이후` : '기준 시점 없음 (최근 24시간)';
+  const sel = $('every');
+  if (document.activeElement !== sel) sel.value = String(s.scan_minutes);
+}
+
+function renderHosts(s) {
+  $('hosts').innerHTML = s.hosts.map(h => {
+    const c = h.counters, sum = (...k) => k.reduce((a, x) => a + (c[x] || 0), 0);
+    const ext = sum('ssh_fail_pub', 'rdp_pub', 'rdp_fail_pub', 'conn_pub', 'login_pub');
+    const fails = sum('ssh_fail', 'rdp_fail', 'logon_fail', 'sudo_fail');
+    const logins = sum('login', 'login_pub');
+    const pubConns = h.conns.filter(x => x.public).length;
+    const live = { connected: ['on', '실시간 수신 중'], connecting: ['wait', '연결 중...'], disconnected: ['off', '실시간 연결 끊김'] }[h.live];
+    const err = h.live === 'disconnected' && h.live_error ? `<div class="err">${esc(h.live_error)}</div>` : '';
+    const scan = h.scanning ? '<span class="spin"></span> 검사 중' : h.last_scan ? `전체 검사 ${ago(h.last_scan, s.now)}` : '검사 대기';
+    return `<article class="card c-${h.level} ${selected === h.name ? 'sel' : ''}" tabindex="0" role="button" data-host="${esc(h.name)}"
+        aria-pressed="${selected === h.name}" title="클릭하면 이 대상만 보기">
+      <div class="top"><h3>${hostLabel(h)}</h3><span class="pill lv-${h.level}">${LV[h.level]}</span></div>
+      <div class="live"><span class="dot ${live[0]}"></span>${live[1]}${h.kind === 'remote' ? (h.lan ? ' · 내부망 서버' : ' · 공개 서버') : ' · 이 PC'}</div>${err}
+      <div class="stats">
+        <div class="stat ${ext ? 'hot' : ''}"><b>${ext}</b><span>외부 접근</span></div>
+        <div class="stat ${fails ? 'hot' : ''}"><b>${fails}</b><span>인증 실패</span></div>
+        <div class="stat"><b>${logins}</b><span>로그인</span></div>
+        <div class="stat ${pubConns ? 'hot' : ''}"><b>${h.conns.length}${pubConns ? `<small> (외부 ${pubConns})</small>` : ''}</b><span>현재 연결</span></div>
+      </div>
+      <div class="foot"><span>${scan}</span><span>이번 실행 중 집계</span></div>
+    </article>`;
+  }).join('');
+  document.querySelectorAll('.card').forEach(el => {
+    const pick = () => { selected = selected === el.dataset.host ? null : el.dataset.host; render(); };
+    el.onclick = pick;
+    el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } };
+  });
+}
+
+function findingRow(f) {
+  const d = f.details.length ? `<ul>${f.details.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '';
+  return `<div class="f"><span class="tag lv-${f.level}">${LV[f.level]}</span><div>${esc(f.text)}${d}</div></div>`;
+}
+
+function renderFindings(s) {
+  const hosts = s.hosts.filter(h => !selected || h.name === selected);
+  $('findhint').textContent = selected ? '선택한 대상만 표시 중 (카드를 다시 누르면 전체)'
+    : `${s.watch_since && s.now - s.watch_since < 86400 ? '기준 시점 이후' : '최근 24시간'} 로그 + 기준선 비교`;
+  $('findings').innerHTML = hosts.map(h => {
+    const all = [...h.findings, ...h.changes];
+    const serious = all.filter(f => RANK[f.level] >= 2);
+    let body;
+    if (!h.last_scan) body = `<div class="empty"><span class="spin"></span> 첫 전체 검사 중...</div>`;
+    else {
+      body = (serious.length ? '' : `<div class="f"><span class="tag lv-ok">정상</span><div>주의할 이상 징후 없음</div></div>`)
+        + all.map(findingRow).join('');
+    }
+    const accept = h.changes.length ? `<button class="btn" data-accept="${esc(h.name)}" title="지금 상태를 정상으로 인정하고 이후 비교 기준으로 저장">변경 사항 승인</button>` : '';
+    return `<div class="hostblock"><h4><span>${hostLabel(h)}</span>${accept}</h4>${body}</div>`;
+  }).join('');
+  document.querySelectorAll('[data-accept]').forEach(b => b.onclick = async () => {
+    const name = b.dataset.accept;
+    if (!confirm(`${name}: 기준선과 달라진 항목을 모두 확인했고, 지금 상태를 새 기준선으로 저장할까요?`)) return;
+    b.disabled = true;
+    try { await api('/api/accept?host=' + encodeURIComponent(name), 'POST'); } catch (e) { alert('저장 실패: ' + e.message); }
+  });
+}
+
+function renderFeed(s) {
+  const list = [...events.values()]
+    .filter(e => !selected || e.host === selected)
+    .filter(e => filter === 'all' || RANK[e.level] >= 2 || e.public)
+    .sort((a, b) => b.last_ts - a.last_ts || b.id - a.id)
+    .slice(0, 300);
+  const titles = Object.fromEntries(s.hosts.map(h => [h.name, h.title]));
+  $('feed').innerHTML = list.length ? list.map(e => {
+    const fresh = !firstLoad && e.seq > lastSeen ? ' fresh' : '';
+    const n = e.count > 1 ? `<span class="n">×${e.count} · ${clock(e.ts)}부터</span>` : '';
+    return `<div class="ev${fresh}"><span class="t">${clock(e.last_ts)}</span><span class="tag lv-${e.level}">${LV[e.level]}</span>
+      <div><span class="h">${esc(titles[e.host] || e.host || 'security-watch')}</span>${esc(e.text)}${n}</div></div>`;
+  }).join('') : `<div class="empty">${filter === 'all' ? '아직 이벤트가 없습니다.' : '중요 이벤트가 없습니다. "전체"를 누르면 일반 로그인 등도 보입니다.'}</div>`;
+  lastSeen = seq; firstLoad = false;
+}
+
+function renderConns(s) {
+  const rows = [];
+  for (const h of s.hosts) {
+    if (selected && h.name !== selected) continue;
+    for (const c of h.conns) rows.push({ h, c });
+  }
+  rows.sort((a, b) => (b.c.public - a.c.public));
+  $('conns').innerHTML = rows.length ? `<table><thead><tr><th>대상</th><th>상대 주소</th><th>받은 포트</th><th>프로세스</th></tr></thead><tbody>${
+    rows.map(({ h, c }) => `<tr><td>${esc(h.title)}</td><td class="mono ${c.public ? 'pub' : ''}">${esc(c.peer)}${c.public ? ' (외부)' : ''}</td>
+      <td class="mono">${esc(c.local)}</td><td>${c.proc === '?' ? '<span class="meta">권한 필요</span>' : esc(c.proc)}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">지금 들어와 있는 연결이 없습니다.</div>';
+}
+
+function render() {
+  if (!state) return;
+  renderHeader(state); renderHosts(state); renderFindings(state); renderFeed(state); renderConns(state);
+}
+
+document.querySelectorAll('.chip').forEach(b => b.onclick = () => {
+  filter = b.dataset.f;
+  document.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === b));
+  render();
+});
+$('scanbtn').onclick = async () => { $('scanbtn').disabled = true; try { await api('/api/scan', 'POST'); } catch (e) {} };
+$('sincebtn').onclick = async () => {
+  if (!confirm('지금 시각을 기준 시점으로 정할까요?
+이전 로그 기록(이미 조치한 과거 공격 등)은 점검 결과에서 빠지고, 바로 전체 검사를 다시 합니다.
+(기준선 비교와 실시간 이벤트는 그대로입니다)')) return;
+  try { await api('/api/watch-since', 'POST'); } catch (e) { alert('실패: ' + e.message); }
+};
+$('every').onchange = async e => { try { await api('/api/settings?scan_minutes=' + e.target.value, 'POST'); } catch (err) {} };
+poll();
+</script>
+</body>
+</html>
