@@ -22,8 +22,23 @@ foreach ($k in $logs.Keys) {
 $ipre = '(\d{1,3}(\.\d{1,3}){3})'
 $from = (Get-Date).AddMinutes(-1)
 
+# USB devices present now; later arrivals are reported as USBNEW.
+function UsbDevices {
+    $m = @{}
+    Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match '^(USB|USBSTOR|HID)\\' } | ForEach-Object {
+        $vid = if ($_.InstanceId -match 'VID_([0-9A-F]{4})') { $Matches[1] } else { '----' }
+        $prodId = if ($_.InstanceId -match 'PID_([0-9A-F]{4})') { $Matches[1] } else { '----' }
+        $m[$_.InstanceId] = '{0} {1} {2} {3}' -f $_.Class, $vid, $prodId, ($_.FriendlyName -replace '\s+', '_')
+    }
+    $m
+}
+$usb = UsbDevices
+
 while ($true) {
     $now = Get-Date
+    $cur = UsbDevices
+    foreach ($k in $cur.Keys) { if (-not $usb.ContainsKey($k)) { Out ("EV {0} USBNEW {1}" -f (Ts $now), $cur[$k]) } }
+    $usb = $cur
     Get-WinEvent -FilterHashtable @{ LogName = $logs.core; Id = 131, 140; StartTime = $from } |
         Where-Object { $_.RecordId -gt $lastId.core } | Sort-Object RecordId | ForEach-Object {
             $lastId.core = $_.RecordId

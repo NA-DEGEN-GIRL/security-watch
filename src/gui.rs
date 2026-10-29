@@ -381,6 +381,39 @@ impl Gui {
         });
     }
 
+    fn usb_panel(&self, ui: &mut egui::Ui, g: &Inner, p: &Palette) {
+        panel(ui, p, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("USB 키보드형 장치 (BadUSB 감시)").strong().size(15.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new("새로 꽂은 장치의 Windows 키·단축키·초고속 입력을 감지 · 입력한 글자는 기록하지 않음").color(p.muted).size(12.5));
+                });
+            });
+            let devs: Vec<_> = g.usb.iter().collect();
+            if devs.is_empty() {
+                ui.label(RichText::new("연결된 USB 키보드형 장치가 없습니다.").color(p.muted));
+                return;
+            }
+            egui::Grid::new("usb_grid").striped(true).num_columns(3).min_col_width(160.0).show(ui, |ui| {
+                for head in ["장치", "상태", "입력한 키 수"] {
+                    ui.label(RichText::new(head).color(p.muted).strong().size(12.5));
+                }
+                ui.end_row();
+                for d in devs {
+                    ui.label(&d.label);
+                    if d.new {
+                        ui.label(RichText::new(format!("이번 실행 중 연결됨 · {}", ago(crate::now_epoch().saturating_sub(d.secs), crate::now_epoch()))).color(p.warn));
+                        ui.label(d.keys.to_string());
+                    } else {
+                        ui.label(RichText::new("시작할 때부터 연결됨 (신뢰)").color(p.muted));
+                        ui.label(RichText::new("-").color(p.muted));
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+    }
+
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(c) = &self.confirm else { return };
         let (title, body) = match c {
@@ -513,6 +546,10 @@ impl eframe::App for Gui {
                     ui.add_space(12.0);
                     self.conns_panel(ui, &g, &p);
                     ui.add_space(12.0);
+                    if g.hosts.iter().any(|h| matches!(h.target.kind, Kind::Local)) {
+                        self.usb_panel(ui, &g, &p);
+                        ui.add_space(12.0);
+                    }
                 });
             });
         }

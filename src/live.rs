@@ -112,7 +112,7 @@ fn handle_line(app: &App, host: &str, lan: bool, line: &str, pending: &mut Optio
         let mut it = rest.splitn(2, ' ');
         let ts = it.next().and_then(|t| t.parse::<f64>().ok()).map(|t| t as u64).unwrap_or_else(crate::now_epoch);
         let body = it.next().unwrap_or("");
-        if body.starts_with("RDP") || body.starts_with("LOGONFAIL") {
+        if body.starts_with("RDP") || body.starts_with("LOGONFAIL") || body.starts_with("USBNEW") {
             windows_event(app, host, ts, body);
         } else {
             // journalctl short-unix: "<hostname> <ident>[pid]: <message>"
@@ -267,6 +267,24 @@ fn windows_event(app: &App, host: &str, ts: u64, body: &str) {
                 (Level::Info, format!("RDP 로그인 {user} ← {ip}"))
             };
             g.push_event(host, level, format!("rdplogon:{user}:{ip}"), text, public, ts, FOLD);
+        }
+        ["USBNEW", class, vid, pid, name @ ..] => {
+            let name = name.join(" ").replace('_', " ");
+            let yubico = *vid == "1050";
+            let kind = match *class {
+                "DiskDrive" | "WPD" | "Volume" => "저장장치",
+                "Net" => "네트워크 어댑터",
+                "Ports" | "Modem" => "시리얼 포트",
+                "SmartCardReader" | "SmartCard" | "SecurityDevices" => "보안키/스마트카드",
+                _ => return, // keyboards/HID are watched by the raw-input guard
+            };
+            let (level, note) = match (yubico, kind) {
+                (true, "보안키/스마트카드") => (Level::Info, String::new()),
+                (true, _) => (Level::Alert, " · YubiKey는 이렇게 인식되지 않습니다. 가짜/변조 장치일 수 있으니 바로 뽑으세요".to_string()),
+                (false, "네트워크 어댑터") => (Level::Warn, " · 직접 꽂은 랜카드가 아니라면 통신을 가로채는 장치일 수 있습니다".to_string()),
+                _ => (Level::Info, String::new()),
+            };
+            g.push_event(host, level, format!("usb:{vid}:{pid}:{class}"), format!("USB {kind} 연결: {name} (VID {vid} PID {pid}){note}"), false, ts, FOLD);
         }
         ["LOGONFAIL", ip, ..] => {
             let public = !is_private_ip(ip);

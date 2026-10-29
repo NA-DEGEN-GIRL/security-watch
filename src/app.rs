@@ -27,6 +27,17 @@ pub struct Conn {
     pub public: bool,
 }
 
+/// A keyboard-type USB device as seen by the BadUSB guard.
+#[derive(Clone)]
+pub struct UsbDevice {
+    pub label: String,
+    /// Plugged in while the program was running.
+    pub new: bool,
+    /// Key presses since it was plugged in (only counted for new devices).
+    pub keys: u64,
+    pub secs: u64,
+}
+
 pub struct Event {
     pub id: u64,
     pub ts: u64,
@@ -69,6 +80,7 @@ pub struct Inner {
     pub force_scan: bool,
     /// Reference point for log-based findings (0 = none).
     pub watch_since: u64,
+    pub usb: Vec<UsbDevice>,
 }
 
 pub struct App {
@@ -106,6 +118,7 @@ impl App {
                 scan_minutes: 5,
                 force_scan: false,
                 watch_since: scan::load_watch_since(&root),
+                usb: Vec::new(),
             }),
             root,
             children: Mutex::new(Vec::new()),

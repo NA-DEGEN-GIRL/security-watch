@@ -14,6 +14,7 @@ mod report;
 mod runner;
 mod scan;
 mod ui;
+mod usb;
 mod win;
 
 use std::path::{Path, PathBuf};

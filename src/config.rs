@@ -44,6 +44,9 @@ const DEFAULT_CONFIG: &str = "\
 #   public : 인터넷에 직접 열린 서버(VPS 등). 공인 IP의 무차별 대입 시도는 '정보'로만 집계합니다.
 local
 # host my-server lan
+#
+# usb-lock off                 BadUSB 의심 입력(새로 꽂은 장치의 Windows 키·단축키·초고속 입력) 때
+#                              PC를 잠그지 않고 경고만 합니다 (기본: 잠금)
 ";
 
 /// Where config, baselines and reports live (never inside the published repo):
@@ -75,6 +78,12 @@ pub fn load(root: &Path) -> (Vec<Target>, bool) {
         }
     };
     (parse(&text), created)
+}
+
+/// `usb-lock off` in the config disables locking the PC on a BadUSB-like device.
+pub fn usb_lock_enabled(root: &Path) -> bool {
+    let text = fs::read_to_string(root.join(CONFIG_FILE)).unwrap_or_default();
+    !text.lines().map(str::trim).any(|l| l.split_whitespace().collect::<Vec<_>>() == ["usb-lock", "off"])
 }
 
 fn parse(text: &str) -> Vec<Target> {

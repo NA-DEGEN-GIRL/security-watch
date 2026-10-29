@@ -50,7 +50,12 @@ pub fn run(root: PathBuf, demo: bool) {
         Arc::new(demo_app())
     } else {
         let (targets, _) = config::load(&root);
+        let usb_lock = config::usb_lock_enabled(&root);
+        let watch_usb = targets.iter().any(|t| matches!(t.kind, Kind::Local));
         let app = Arc::new(App::new(root, targets.clone()));
+        if watch_usb {
+            crate::usb::start(Arc::clone(&app), usb_lock);
+        }
         for t in targets {
             live::start(&app, t);
         }

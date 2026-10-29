@@ -44,6 +44,14 @@ How fresh the data is:
   router forwards RDP to the internet); event-log rollover caused by floods; RDP logons
 - Failed Windows logons (event 4625, needs "Run as administrator")
 - Defender real-time protection, Windows Firewall profiles, OpenSSH server
+- **BadUSB guard (live):** with the Raw Input API it knows which device each keystroke came
+  from. A keyboard-type device plugged in while the app runs that presses the Windows key,
+  sends Ctrl/Alt shortcuts or types at machine speed raises an alert, and within a minute of
+  plug-in **locks the PC** before an injected command can run (`usb-lock off` in the config
+  to only warn). Only key classes and timing are inspected; typed characters are never
+  recorded. A YubiKey typing its OTP is expected; a YubiKey that shows up as storage, a
+  network adapter or a serial port is flagged. New USB storage, network adapters and serial
+  ports are reported.
 - Baseline: listening ports, local accounts, Administrators group, Run keys and Startup
   folder, non-Microsoft scheduled tasks, auto-start services
 
