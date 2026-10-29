@@ -51,7 +51,12 @@ foreach ($k in $runKeys) {
 foreach ($d in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup'))) {
     if ($d) { Get-ChildItem -LiteralPath $d -File | ForEach-Object { Out ("AUTORUN startup\" + $_.Name) } }
 }
-Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\Microsoft\*' -and $_.State -ne 'Disabled' } | ForEach-Object {
+# \SoftLanding\<SID>\ holds Windows Start/tips tasks that rotate GUID names; skip them
+# only while every action is a COM handler (no exe/script), so a planted program still shows.
+Get-ScheduledTask | Where-Object {
+    $_.TaskPath -notlike '\Microsoft\*' -and $_.State -ne 'Disabled' -and
+    -not ($_.TaskPath -like '\SoftLanding\*' -and -not ($_.Actions | Where-Object { $_.Execute }))
+} | ForEach-Object {
     Out ("TASK " + $_.TaskPath + $_.TaskName)
 }
 Get-CimInstance Win32_Service | Where-Object {
