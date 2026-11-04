@@ -65,12 +65,18 @@ while ($true) {
     $from = $now.AddSeconds(-30)
 
     $listen = @{}
-    Get-NetTCPConnection -State Listen | ForEach-Object { $listen[[int]$_.LocalPort] = 1 }
+    # Inbound = local address:port matches a listener reachable from outside (wildcard or
+    # that exact address). Port-only matching misread outbound connections whose ephemeral
+    # source port happened to equal some loopback-only listener's port.
+    Get-NetTCPConnection -State Listen | Where-Object { $_.LocalAddress -notin @('127.0.0.1', '::1') } |
+        ForEach-Object { $listen[('{0}|{1}' -f $_.LocalAddress, $_.LocalPort)] = 1 }
     $procs = @{}
     Get-Process | ForEach-Object { $procs[[int]$_.Id] = $_.ProcessName }
     Out ("CONNS " + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
     Get-NetTCPConnection -State Established | Where-Object {
-        $listen.ContainsKey([int]$_.LocalPort) -and $_.RemoteAddress -notin @('127.0.0.1', '::1')
+        $p = $_.LocalPort
+        ($listen.ContainsKey("0.0.0.0|$p") -or $listen.ContainsKey("::|$p") -or $listen.ContainsKey(('{0}|{1}' -f $_.LocalAddress, $p))) -and
+        $_.RemoteAddress -notin @('127.0.0.1', '::1')
     } | ForEach-Object {
         Out ("CONN tcp {0}:{1} {2}:{3} {4}" -f $_.LocalAddress, $_.LocalPort, $_.RemoteAddress, $_.RemotePort, $procs[[int]$_.OwningProcess])
     }

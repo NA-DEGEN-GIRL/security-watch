@@ -16,9 +16,14 @@ trap 'trap - EXIT; kill 0 2>/dev/null' EXIT HUP TERM INT PIPE
 
 while :; do
   echo "CONNS $(date +%s)" || break
-  LISTEN=" $(ss -Htln 2>/dev/null | awk '{n=split($4,a,":"); print a[n]}' | sort -u | tr '\n' ' ') "
+  # Listeners reachable from outside, as "addr:port" (loopback-only ones excluded). An
+  # established socket is inbound only if its local addr:port matches one of them, either
+  # exactly or through a wildcard listener; matching on the port alone misreads outbound
+  # connections whose ephemeral port equals some loopback listener's port.
+  LISTEN=" $(ss -Htln 2>/dev/null | awk '{print $4}' | grep -vE '^(127\.|\[::1\]|\[::ffff:127\.)' | sort -u | tr '\n' ' ') "
   $S ss -Htnp state established 2>/dev/null | awk -v L="$LISTEN" '
-    { n = split($3, a, ":"); if (index(L, " " a[n] " ") == 0) next
+    { n = split($3, a, ":"); port = a[n]
+      if (index(L, " " $3 " ") == 0 && index(L, " *:" port " ") == 0 && index(L, " 0.0.0.0:" port " ") == 0 && index(L, " [::]:" port " ") == 0) next
       if ($4 ~ /^(127\.|\[::1\]|\[::ffff:127\.)/) next
       lh = $3; sub(/:[0-9]+$/, "", lh); ph = $4; sub(/:[0-9]+$/, "", ph)
       if (lh == ph) next   # the host talking to itself through its LAN address
