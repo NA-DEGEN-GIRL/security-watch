@@ -273,6 +273,9 @@ impl Gui {
                         if let Some(hn) = h.hostname.as_deref().filter(|n| *n != h.target.title()) {
                             ui.label(RichText::new(hn).color(p.muted));
                         }
+                        if h.last_scan > 0 {
+                            ui.label(RichText::new(format!("· 검사 {}", win::fmt_clock(h.last_scan, now, self.offset))).color(p.muted).size(12.5));
+                        }
                         if !h.changes.is_empty() {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui.button("변경 사항 승인").on_hover_text("지금 상태를 정상으로 인정하고 이후 비교 기준으로 저장").clicked() {

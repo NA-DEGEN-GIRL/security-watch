@@ -151,16 +151,17 @@ pub fn local_offset() -> i64 {
     ((local - utc) as f64 / 900.0).round() as i64 * 900 // time zones are multiples of 15 min
 }
 
-/// "13:05:09" for today, "10/28 23:39" otherwise (local time).
+/// Local date and time: "10/28 23:39:00", with the year added when it is not this year.
 pub fn fmt_clock(ts: u64, now: u64, offset: i64) -> String {
-    let (l, n) = (ts as i64 + offset, now as i64 + offset);
+    let l = ts as i64 + offset;
     let (day, sec) = (l.div_euclid(86_400), l.rem_euclid(86_400));
     let (h, mi, s) = (sec / 3600, sec % 3600 / 60, sec % 60);
-    if day == n.div_euclid(86_400) {
-        format!("{h:02}:{mi:02}:{s:02}")
+    let (y, m, d) = civil_from_days(day);
+    let (this_year, _, _) = civil_from_days((now as i64 + offset).div_euclid(86_400));
+    if y == this_year {
+        format!("{m:02}/{d:02} {h:02}:{mi:02}:{s:02}")
     } else {
-        let (_, m, d) = civil_from_days(day);
-        format!("{m}/{d} {h:02}:{mi:02}")
+        format!("{y}/{m:02}/{d:02} {h:02}:{mi:02}:{s:02}")
     }
 }
 
@@ -174,8 +175,9 @@ mod tests {
         assert_eq!(civil_from_days(days_from_civil(2026, 10, 29)), (2026, 10, 29));
         // 2026-10-28 14:39:00 UTC shown in KST (+9h) on a different day
         let ts = days_from_civil(2026, 10, 28) as u64 * 86_400 + 14 * 3600 + 39 * 60;
-        assert_eq!(fmt_clock(ts, ts + 86_400 * 2, 9 * 3600), "10/28 23:39");
-        assert_eq!(fmt_clock(ts, ts, 9 * 3600), "23:39:00");
+        assert_eq!(fmt_clock(ts, ts + 86_400 * 2, 9 * 3600), "10/28 23:39:00");
+        assert_eq!(fmt_clock(ts, ts, 9 * 3600), "10/28 23:39:00");
+        assert_eq!(fmt_clock(ts, ts + 86_400 * 400, 9 * 3600), "2026/10/28 23:39:00");
     }
 }
 
