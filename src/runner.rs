@@ -75,20 +75,30 @@ pub fn probe_remote(host: &str, since: u64) -> Result<Output, String> {
     run(cmd, Some(script), Duration::from_secs(120))
 }
 
-/// Runs the PowerShell probe on this PC (passed as -EncodedCommand: no temp files).
+/// Windows PowerShell reading its script from stdin: no temp file, and no limit on the
+/// script size (a command line stops at 32,767 characters). Started from PowerShell 7
+/// it would inherit a module path that breaks its own built-in modules.
+pub fn powershell_stdin() -> Command {
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "[Console]::In.ReadToEnd() | Invoke-Expression"]);
+    cmd.env_remove("PSModulePath");
+    cmd
+}
+
+/// Runs the PowerShell probe on this PC.
 pub fn probe_local(since: u64) -> Result<Output, String> {
     let script = WINDOWS_PROBE.replace("__SINCE__", &since.to_string());
-    let mut cmd = Command::new("powershell.exe");
-    cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &encode_ps(&script)]);
-    run(cmd, None, Duration::from_secs(180))
+    run(powershell_stdin(), Some(script.into_bytes()), Duration::from_secs(180))
 }
 
 /// PowerShell `-EncodedCommand` form: base64 of UTF-16LE.
+#[cfg(test)]
 pub fn encode_ps(script: &str) -> String {
     let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
     base64(&utf16)
 }
 
+#[cfg(test)]
 fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(data.len().div_ceil(3) * 4);

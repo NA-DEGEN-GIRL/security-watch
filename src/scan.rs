@@ -86,7 +86,21 @@ pub fn check(target: &Target, root: &Path, now: u64, fixed_since: Option<u64>) -
     let items = baseline::items(&snap);
     let base_path = baseline_path(root, target);
     match baseline::load(&base_path) {
-        Some(base) => r.changes = eval::changes_to_findings(&baseline::diff(&base, &items)),
+        Some((mut base, new_checks)) => {
+            if !new_checks.is_empty() {
+                // Checks this version added: what they see now becomes their starting point.
+                let before = base.len();
+                base.extend(items.iter().filter(|((c, _), _)| new_checks.contains(&c.as_str())).map(|(k, v)| (k.clone(), v.clone())));
+                if snap.complete && baseline::save(&base_path, &base).is_ok() && base.len() > before {
+                    r.findings.push(Finding {
+                        level: Level::Info,
+                        text: format!("새로 추가된 점검의 현재 상태 {}개를 기준선에 넣었습니다. 다음부터 이 상태와 비교합니다", base.len() - before),
+                        details: vec![],
+                    });
+                }
+            }
+            r.changes = eval::changes_to_findings(&baseline::diff(&base, &items));
+        }
         None if snap.complete => {
             let _ = std::fs::create_dir_all(root.join("state"));
             if baseline::save(&base_path, &items).is_ok() {

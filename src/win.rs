@@ -88,6 +88,18 @@ unsafe extern "system" {
     fn FindWindowW(class: *const u16, title: *const u16) -> *mut c_void;
     fn ShowWindow(hwnd: *mut c_void, cmd: i32) -> i32;
     fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+    fn IsIconic(hwnd: *mut c_void) -> i32;
+    fn FlashWindowEx(info: *const FlashInfo) -> i32;
+}
+
+/// FLASHWINFO
+#[repr(C)]
+struct FlashInfo {
+    size: u32,
+    hwnd: *mut c_void,
+    flags: u32,
+    count: u32,
+    timeout: u32,
 }
 
 #[link(name = "kernel32")]
@@ -109,12 +121,34 @@ pub fn single_instance(mutex_name: &str, title: &str) -> bool {
         if !m.is_null() && GetLastError() != ERROR_ALREADY_EXISTS {
             return true; // keep the handle open for the life of the process
         }
+        bring_to_front(title);
+        false
+    }
+}
+
+/// Brings the window with this title to the front (restoring it if minimized).
+pub fn bring_to_front(title: &str) {
+    unsafe {
         let hwnd = FindWindowW(std::ptr::null(), wide(title).as_ptr());
         if !hwnd.is_null() {
-            ShowWindow(hwnd, 9); // SW_RESTORE
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, 9); // SW_RESTORE
+            }
             SetForegroundWindow(hwnd);
         }
-        false
+    }
+}
+
+/// Flashes the taskbar button of the window with this title until it is opened.
+pub fn flash(title: &str) {
+    const FLASHW_TRAY: u32 = 2;
+    const FLASHW_TIMERNOFG: u32 = 12;
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), wide(title).as_ptr());
+        if !hwnd.is_null() {
+            let info = FlashInfo { size: std::mem::size_of::<FlashInfo>() as u32, hwnd, flags: FLASHW_TRAY | FLASHW_TIMERNOFG, count: 0, timeout: 0 };
+            FlashWindowEx(&info);
+        }
     }
 }
 

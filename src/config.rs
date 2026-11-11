@@ -47,6 +47,9 @@ local
 #
 # usb-lock off                 BadUSB 의심 입력(새로 꽂은 장치의 Windows 키·단축키·초고속 입력) 때
 #                              PC를 잠그지 않고 경고만 합니다 (기본: 잠금)
+# alarm off                    위험 이벤트가 생겨도 알림(트레이 풍선·소리)을 띄우지 않습니다 (기본: 알림)
+# ignore <문구>                 프로세스·외부 통신 감시에서 이 문구가 들어간 항목은 무시합니다
+#                              (직접 만든/고친 프로그램이 계속 잡힐 때. 예: ignore D:\\tools\\my-app\\)
 ";
 
 /// Where config, baselines and reports live (never inside the published repo):
@@ -80,10 +83,32 @@ pub fn load(root: &Path) -> (Vec<Target>, bool) {
     (parse(&text), created)
 }
 
-/// `usb-lock off` in the config disables locking the PC on a BadUSB-like device.
-pub fn usb_lock_enabled(root: &Path) -> bool {
-    let text = fs::read_to_string(root.join(CONFIG_FILE)).unwrap_or_default();
-    !text.lines().map(str::trim).any(|l| l.split_whitespace().collect::<Vec<_>>() == ["usb-lock", "off"])
+/// Switches in the config file besides the host list.
+pub struct Options {
+    /// Lock the PC on a BadUSB-like device (`usb-lock off` disables it).
+    pub usb_lock: bool,
+    /// Tray notification and sound on dangerous events (`alarm off` disables them).
+    pub alarm: bool,
+    /// `ignore <text>`: process/network detections containing the text are dropped.
+    pub ignore: Vec<String>,
+}
+
+pub fn options(root: &Path) -> Options {
+    parse_options(&fs::read_to_string(root.join(CONFIG_FILE)).unwrap_or_default())
+}
+
+fn parse_options(text: &str) -> Options {
+    let mut o = Options { usb_lock: true, alarm: true, ignore: Vec::new() };
+    for line in text.lines().map(str::trim) {
+        let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        match (word, rest.trim()) {
+            ("usb-lock", "off") => o.usb_lock = false,
+            ("alarm", "off") => o.alarm = false,
+            ("ignore", t) if !t.is_empty() => o.ignore.push(t.to_lowercase()),
+            _ => {}
+        }
+    }
+    o
 }
 
 fn parse(text: &str) -> Vec<Target> {
@@ -114,5 +139,12 @@ mod tests {
         assert_eq!(t.len(), 3);
         assert!(matches!(t[1].kind, Kind::Remote { lan_only: true }));
         assert!(matches!(t[2].kind, Kind::Remote { lan_only: false }));
+    }
+
+    #[test]
+    fn parses_options() {
+        let o = parse_options("local\n# alarm off\nusb-lock  off\nignore D:\\My Tools\\\n");
+        assert!(!o.usb_lock && o.alarm);
+        assert_eq!(o.ignore, vec!["d:\\my tools\\".to_string()]);
     }
 }

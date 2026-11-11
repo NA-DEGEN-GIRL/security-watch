@@ -66,5 +66,21 @@ crontab -l 2>/dev/null | grep -vE '^\s*(#|$)' | while IFS= read -r l; do echo "C
 R 'for f in /var/spool/cron/crontabs/*; do [ -f "$f" ] || continue; u=$(basename "$f"); grep -vE "^\s*(#|$)" "$f" | while IFS= read -r l; do echo "CRON $u $(printf "%s" "$l" | sha256sum | cut -c1-10) $(printf "%s" "$l" | cut -c1-60)"; done; done' | grep -v "^CRON $(id -un) "
 for f in /etc/cron.d/*; do [ -f "$f" ] && echo "CRONFILE ${f##*/}"; done
 
+# --- content of what runs at boot/login, and programs that run as root for anyone ---
+for f in /etc/crontab /etc/rc.local /etc/profile /etc/bash.bashrc /etc/environment /etc/ld.so.conf /etc/profile.d/* /etc/ld.so.conf.d/*; do
+  [ -f "$f" ] && echo "FILEHASH $f $(sha256sum < "$f" 2>/dev/null | cut -c1-10)"
+done
+# a symlinked unit belongs to a package (its content changes with updates): track where it points
+for f in /etc/systemd/system/*.service /etc/systemd/system/*.timer /etc/systemd/system/*.d/*.conf; do
+  [ -f "$f" ] || continue
+  if [ -L "$f" ]; then h=$(readlink "$f" | sha256sum | cut -c1-10); else h=$(sha256sum < "$f" 2>/dev/null | cut -c1-10); fi
+  echo "UNITHASH system ${f#/etc/systemd/system/} $h"
+done
+# /home is left out on purpose: walking it takes a minute on a big disk
+R "find /usr /opt /etc /tmp /var/tmp /dev/shm -xdev -type f -perm -4000 -printf 'SUID %p\n'" | sort | head -200
+# core packages whose installed files no longer match the package checksums
+# (conffiles are meant to be edited; '?' means the file could not be read)
+command -v dpkg >/dev/null 2>&1 && R 'for p in coreutils gnu-coreutils rust-coreutils openssh-server openssh-client sudo sudo-rs bash login passwd util-linux libpam-modules libpam-runtime procps systemd libc6; do dpkg -V "$p"; done' | awk '$2 != "c" && substr($1,3,1) == "5" { print "PKGMOD", $2 }' | head -20
+
 [ -f /var/run/reboot-required ] && echo "REBOOT required"
 echo "END"

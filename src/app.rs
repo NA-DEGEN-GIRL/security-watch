@@ -4,7 +4,7 @@ use crate::baseline;
 use crate::config::Target;
 use crate::eval::{Finding, Level};
 use crate::scan::{self, ScanResult};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,11 +81,16 @@ pub struct Inner {
     /// Reference point for log-based findings (0 = none).
     pub watch_since: u64,
     pub usb: Vec<UsbDevice>,
+    /// Dangerous events waiting to be shown as a notification.
+    pub alarms: Vec<String>,
+    pub alarm_on: bool,
 }
 
 pub struct App {
     pub inner: Mutex<Inner>,
     pub root: PathBuf,
+    /// Lowercase texts from `ignore` config lines.
+    pub ignore: Vec<String>,
     pub children: Mutex<Vec<Child>>,
     pub stopping: AtomicBool,
 }
@@ -119,8 +124,11 @@ impl App {
                 force_scan: false,
                 watch_since: scan::load_watch_since(&root),
                 usb: Vec::new(),
+                alarms: Vec::new(),
+                alarm_on: true,
             }),
             root,
+            ignore: Vec::new(),
             children: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
         }
@@ -164,6 +172,12 @@ impl App {
 
     pub fn set_scan_minutes(&self, minutes: u64) {
         self.lock().scan_minutes = minutes.clamp(1, 1440);
+    }
+
+    pub fn set_alarm(&self, on: bool) {
+        let mut g = self.lock();
+        g.alarm_on = on;
+        g.alarms.clear();
     }
 
     /// Hide log history older than now from findings and rescan.
@@ -214,9 +228,16 @@ impl Inner {
             {
                 e.count += 1;
                 e.last_ts = e.last_ts.max(ts);
+                let raised = (level > e.level && level == Level::Alert).then(|| e.text.clone());
                 e.level = e.level.max(level);
+                if let Some(text) = raised {
+                    self.alarm(host, &text, ts);
+                }
                 return;
             }
+        }
+        if level == Level::Alert {
+            self.alarm(host, &text, ts);
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -226,8 +247,32 @@ impl Inner {
         }
     }
 
+    /// Queues a notification for something dangerous happening now (old log lines stay quiet).
+    fn alarm(&mut self, host: &str, text: &str, ts: u64) {
+        if !self.alarm_on || self.alarms.len() >= 50 || crate::now_epoch().saturating_sub(ts) > 300 {
+            return;
+        }
+        let title = self.hosts.iter().find(|h| h.target.name == host).map(|h| h.target.title());
+        self.alarms.push(match title {
+            Some(t) => format!("[{t}] {text}"),
+            None => text.to_string(),
+        });
+    }
+
     pub fn apply_scan(&mut self, name: &str, r: ScanResult, now: u64) {
+        // Dangerous findings that were not there after the previous scan raise the alarm
+        // (compared without digits, so a growing count is not "new").
+        fn alerts(h: &HostState) -> Vec<(String, String)> {
+            h.findings
+                .iter()
+                .chain(&h.changes)
+                .filter(|f| f.level == Level::Alert && !f.text.starts_with("검사 실패"))
+                .map(|f| (f.text.chars().filter(|c| !c.is_ascii_digit()).collect(), f.text.clone()))
+                .collect()
+        }
+        let mut fresh = Vec::new();
         if let Some(h) = self.host_mut(name) {
+            let before: HashSet<String> = alerts(h).into_iter().map(|a| a.0).collect();
             h.scanning = false;
             h.last_scan = now;
             h.scan_ok = r.complete;
@@ -239,6 +284,10 @@ impl Inner {
             if r.items.is_some() {
                 h.items = r.items;
             }
+            fresh = alerts(h).into_iter().filter(|a| !before.contains(&a.0)).map(|a| a.1).collect();
+        }
+        for text in fresh {
+            self.alarm(name, &text, now);
         }
     }
 
@@ -270,5 +319,23 @@ mod tests {
         assert_eq!(g.events.len(), 2);
         assert_eq!(g.events[0].count, 2);
         assert_eq!(g.events[0].level, Level::Warn);
+    }
+
+    #[test]
+    fn only_fresh_alerts_raise_the_alarm() {
+        let t = Target { name: "h".into(), kind: Kind::Local };
+        let app = App::new(PathBuf::from("."), vec![t]);
+        let now = crate::now_epoch();
+        let mut g = app.lock();
+        g.push_event("h", Level::Alert, "old".into(), "old log line".into(), false, now - 4000, 600);
+        g.push_event("h", Level::Warn, "k".into(), "warn".into(), false, now, 600);
+        assert!(g.alarms.is_empty());
+        g.push_event("h", Level::Alert, "k".into(), "warn".into(), false, now, 600); // escalates
+        g.push_event("h", Level::Alert, "k".into(), "warn".into(), false, now, 600); // folded
+        g.push_event("h", Level::Alert, "k2".into(), "bad".into(), false, now, 600);
+        assert_eq!(g.alarms, vec!["[이 PC] warn".to_string(), "[이 PC] bad".to_string()]);
+        g.alarm_on = false;
+        g.push_event("h", Level::Alert, "k3".into(), "muted".into(), false, now, 600);
+        assert_eq!(g.alarms.len(), 2);
     }
 }

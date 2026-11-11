@@ -4,7 +4,7 @@ use crate::app::{App, Conn, LiveState};
 use crate::config::{self, Kind, Target};
 use crate::eval::{Finding, Level};
 use crate::gui::{self, Gui};
-use crate::{live, scan, win};
+use crate::{live, notify, scan, win};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,12 +50,16 @@ pub fn run(root: PathBuf, demo: bool) {
         Arc::new(demo_app())
     } else {
         let (targets, _) = config::load(&root);
-        let usb_lock = config::usb_lock_enabled(&root);
+        let opts = config::options(&root);
         let watch_usb = targets.iter().any(|t| matches!(t.kind, Kind::Local));
-        let app = Arc::new(App::new(root, targets.clone()));
+        let mut app = App::new(root, targets.clone());
+        app.ignore = opts.ignore;
+        app.lock().alarm_on = opts.alarm;
+        let app = Arc::new(app);
         if watch_usb {
-            crate::usb::start(Arc::clone(&app), usb_lock);
+            crate::usb::start(Arc::clone(&app), opts.usb_lock);
         }
+        notify::start(Arc::clone(&app));
         for t in targets {
             live::start(&app, t);
         }
@@ -77,6 +81,7 @@ pub fn run(root: PathBuf, demo: bool) {
         win::message_box(gui::TITLE, &format!("창을 열지 못했습니다: {e}"));
     }
     app.shutdown();
+    notify::remove();
 }
 
 /// Fake hosts and events for screenshots (`--demo`): documentation IPs only.

@@ -20,6 +20,7 @@ enum Action {
     Select(String),
     Scan,
     Minutes(u64),
+    Alarm(bool),
     Ask(Confirm),
 }
 
@@ -127,6 +128,11 @@ impl Gui {
             badge(ui, p, worst, text);
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let mut alarm = g.alarm_on;
+                if ui.checkbox(&mut alarm, "알림").on_hover_text("위험 이벤트가 생기면 트레이 알림과 소리로 알려 줍니다").changed() {
+                    actions.push(Action::Alarm(alarm));
+                }
+                ui.separator();
                 let scanning = g.hosts.iter().any(|h| h.scanning);
                 if ui.add_enabled(!scanning, egui::Button::new(RichText::new("지금 전체 검사").strong())).clicked() {
                     actions.push(Action::Scan);
@@ -561,6 +567,7 @@ impl eframe::App for Gui {
                 Action::Select(n) => self.selected = if self.selected.as_deref() == Some(n.as_str()) { None } else { Some(n) },
                 Action::Scan => app.request_scan(),
                 Action::Minutes(m) => app.set_scan_minutes(m),
+                Action::Alarm(on) => app.set_alarm(on),
                 Action::Ask(c) => self.confirm = Some(c),
             }
         }

@@ -153,6 +153,10 @@ fn eval_linux(s: &Snapshot, lan_only: bool, out: &mut Vec<Finding>) {
     if !tmpfile.is_empty() {
         out.push(f(Level::Warn, "임시 폴더에 새 실행 파일이 생겼습니다", tmpfile));
     }
+    let pkgmod: Vec<String> = s.all("PKGMOD").map(|r| r.rest.clone()).collect();
+    if !pkgmod.is_empty() {
+        out.push(f(Level::Alert, "핵심 시스템 프로그램이 패키지 원본과 다릅니다 (바꿔치기 의심)", pkgmod));
+    }
     if s.first("REBOOT").is_some() {
         out.push(f(Level::Info, "보안 업데이트 적용을 위해 재부팅이 필요합니다", vec![]));
     }
@@ -227,9 +231,31 @@ fn eval_windows(s: &Snapshot, since: u64, out: &mut Vec<Finding>) {
         }
     }
     if let Some(r) = s.first("DEFENDER") {
+        let val = |name: &str| r.fields().into_iter().find_map(|x| x.strip_prefix(name));
         if r.rest.contains("realtime=False") || r.rest.contains("antivirus=False") {
             out.push(f(Level::Warn, "Microsoft Defender 실시간 보호가 꺼져 있습니다", vec![r.rest.clone()]));
+        } else {
+            if val("tamper=") == Some("False") {
+                out.push(f(Level::Warn, "Microsoft Defender 변조 방지(Tamper Protection)가 꺼져 있습니다", vec![
+                    "악성코드가 백신을 끄지 못하게 막는 기능입니다. Windows 보안 > 바이러스 및 위협 방지 설정에서 켤 수 있습니다".into(),
+                ]));
+            }
+            let age = val("sigage=").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            if age > 7 {
+                out.push(f(Level::Warn, format!("Microsoft Defender 정의 파일이 {age}일째 업데이트되지 않았습니다"), vec![]));
+            }
         }
+    }
+    let mut threats: Vec<String> = s
+        .all("THREAT")
+        .map(|r| {
+            let (n, what) = r.rest.split_once(' ').unwrap_or(("1", &r.rest));
+            format!("{what}  ×{n}")
+        })
+        .collect();
+    if !threats.is_empty() {
+        threats.push("Windows 보안 > 바이러스 및 위협 방지 > 보호 기록에서 조치 결과를 확인하세요".into());
+        out.push(f(Level::Alert, "Microsoft Defender가 악성코드를 탐지했습니다", threats));
     }
     let fw_off: Vec<String> =
         s.all("FIREWALL").filter(|r| r.rest.ends_with("False")).map(|r| r.fields()[0].to_string()).collect();
@@ -255,6 +281,12 @@ fn category(cat: &str) -> (&'static str, Level) {
         "RDP" => ("원격 데스크톱 설정", Level::Warn),
         "SSHD" => ("OpenSSH 서버 상태", Level::Warn),
         "FIREWALL" => ("방화벽 설정", Level::Warn),
+        "PERSIST" => ("시스템 시작 지점(Winlogon/IFEO/LSA 등)", Level::Alert),
+        "HOSTS" => ("hosts 파일 항목", Level::Warn),
+        "PROXY" => ("시스템 프록시 설정", Level::Warn),
+        "SUID" => ("누가 실행해도 root 권한으로 도는 프로그램(SUID)", Level::Alert),
+        "FILEHASH" => ("부팅/로그인 때 실행되는 시스템 스크립트", Level::Warn),
+        "UNITHASH" => ("systemd 서비스/타이머 내용", Level::Warn),
         _ => ("기타", Level::Info),
     }
 }
@@ -271,16 +303,26 @@ pub fn changes_to_findings(changes: &[Change]) -> Vec<Finding> {
         let mut level = Level::Info;
         let mut d = Vec::new();
         for c in changes.iter().filter(|c| c.category == cat) {
-            // User-level systemd units change during normal deploys; report them softly.
-            let item_level = if cat == "UNIT" && c.key.starts_with("user:") { Level::Info } else { add_level };
+            // Units that appear or disappear are already reported by the unit list (UNIT).
+            if cat == "UNITHASH" && !c.key.contains('/') && (c.old.is_none() || c.new.is_none()) {
+                continue;
+            }
+            let item_level = match cat {
+                // User-level systemd units change during normal deploys; report them softly.
+                "UNIT" if c.key.starts_with("user:") => Level::Info,
+                // Packages install SUID programs under /usr; anywhere else is not normal.
+                "SUID" if c.key.starts_with("/usr/") => Level::Warn,
+                _ => add_level,
+            };
             match (&c.old, &c.new) {
                 (None, Some(_)) => {
                     level = level.max(item_level);
                     d.push(format!("+ 새로 생김: {}", c.key));
                 }
                 (Some(o), Some(n)) => {
-                    level = level.max(item_level.min(Level::Warn));
-                    if cat == "MTIME" {
+                    // A redirected start point is as serious as a new one.
+                    level = level.max(if cat == "PERSIST" { item_level } else { item_level.min(Level::Warn) });
+                    if matches!(cat, "MTIME" | "FILEHASH" | "UNITHASH") {
                         d.push(format!("~ 수정됨: {}", c.key));
                     } else {
                         d.push(format!("~ 바뀜: {}  ({o} → {n})", c.key));
@@ -290,7 +332,55 @@ pub fn changes_to_findings(changes: &[Change]) -> Vec<Finding> {
                 (None, None) => {}
             }
         }
-        out.push(f(level, format!("기준선 대비 변경: {label}"), d));
+        if !d.is_empty() {
+            out.push(f(level, format!("기준선 대비 변경: {label}"), d));
+        }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::baseline::{diff, items};
+
+    fn changes(before: &str, after: &str) -> Vec<Finding> {
+        changes_to_findings(&diff(&items(&Snapshot::parse(before)), &items(&Snapshot::parse(after))))
+    }
+
+    #[test]
+    fn defender_state_and_detections() {
+        let mut out = Vec::new();
+        eval_windows(&Snapshot::parse("DEFENDER realtime=True antivirus=True sigage=0 tamper=True\nEND"), 0, &mut out);
+        assert!(out.is_empty());
+        eval_windows(
+            &Snapshot::parse("DEFENDER realtime=True antivirus=True sigage=9 tamper=False\nTHREAT 3 Trojan:Win32/Example.A | file:_C:\\x\\a b.exe\nEND"),
+            0,
+            &mut out,
+        );
+        assert_eq!(out.iter().filter(|f| f.level == Level::Warn).count(), 2);
+        let threat = out.iter().find(|f| f.level == Level::Alert).unwrap();
+        assert_eq!(threat.details[0], "Trojan:Win32/Example.A | file:_C:\\x\\a b.exe  ×3");
+    }
+
+    #[test]
+    fn modified_core_program_is_an_alert() {
+        let mut out = Vec::new();
+        eval_linux(&Snapshot::parse("PKGMOD /usr/bin/ssh\nEND"), true, &mut out);
+        assert!(out.iter().any(|f| f.level == Level::Alert && f.details == ["/usr/bin/ssh"]));
+    }
+
+    #[test]
+    fn baseline_change_levels() {
+        // a hijacked start point stays an alert even though it is a "change", not an addition
+        let c = changes("PERSIST winlogon\\Shell = explorer.exe\nEND", "PERSIST winlogon\\Shell = explorer.exe, x.exe\nEND");
+        assert_eq!(c[0].level, Level::Alert);
+        assert_eq!(changes("END", "SUID /usr/bin/newtool\nEND")[0].level, Level::Warn);
+        assert_eq!(changes("END", "SUID /tmp/sh\nEND")[0].level, Level::Alert);
+        assert_eq!(changes("FILEHASH /etc/profile aa\nEND", "FILEHASH /etc/profile bb\nEND")[0].details, ["~ 수정됨: /etc/profile"]);
+        // a new unit is reported once (by UNIT), its drop-in and edits by UNITHASH
+        assert!(changes("END", "UNITHASH system a.service aa\nEND").is_empty());
+        assert_eq!(changes("END", "UNITHASH system a.service.d/override.conf aa\nEND").len(), 1);
+        assert_eq!(changes("UNITHASH system a.service aa\nEND", "UNITHASH system a.service bb\nEND")[0].level, Level::Warn);
+    }
 }

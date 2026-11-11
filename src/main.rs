@@ -9,8 +9,10 @@ mod config;
 mod eval;
 mod gui;
 mod live;
+mod notify;
 mod probe;
 mod report;
+mod rules;
 mod runner;
 mod scan;
 mod ui;
@@ -34,6 +36,16 @@ fn main() {
     let root = config::resolve_root(&exe_dir);
     win::tie_children_to_process();
 
+    // Developer aid: `--replay <windows|linux> <capture file>` prints what a saved
+    // capture of a live script would raise (for tuning the rules against false alarms).
+    if let Some(i) = args.iter().position(|a| a == "--replay") {
+        win::ensure_console();
+        let text = args.get(i + 2).and_then(|p| std::fs::read(p).ok()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        for line in live::replay(args.get(i + 1).map(String::as_str) == Some("windows"), &text) {
+            println!("{line}");
+        }
+        return;
+    }
     if has("--once") {
         let interactive = win::ensure_console();
         report::run_once(&root, interactive);

