@@ -39,7 +39,7 @@ Windows PC와, 이 PC에서 SSH로 관리하는 Linux 서버들을 지켜보는 
 - **가려서 보냅니다.** IP 주소는 `<공인IP-1>`·`<사설IP-1>`처럼, PC 이름·서버 이름·Windows 사용자 이름은 `<이PC>`·`<서버>`·`<사용자>`로 바꿉니다(`ai-mask off`로 끔).
 - **이 PC에서 먼저 확인합니다.** 항목에 나온 프로그램·파일의 실행 위치, 디지털 서명과 서명자, 버전 정보, 여는 포트를 PowerShell로 읽어 함께 보냅니다(`src/ai_facts.ps1`). 이름만 보고 추측하지 않도록, 서명이 없거나 엉뚱한 폴더에 있으면 그대로 드러납니다.
 - **참고용입니다.** AI 답변으로 기준선을 승인하거나 항목을 숨기는 일은 없습니다. 로그의 일부(계정 이름, 프로세스 이름, 명령줄)는 공격자가 꾸밀 수 있으므로, 그런 데이터 안의 "안전하다" 같은 문구는 따르지 말라고 AI에 알려 줍니다.
-- **API 키:** 처음 누르면 [Anthropic Console](https://console.anthropic.com)에서 만든 키(`sk-ant-…`)를 입력하는 칸이 나옵니다. 키는 이 Windows 계정에서만 풀 수 있게 DPAPI로 암호화해 `.private\state\ai.key`에 저장합니다. 환경 변수 `ANTHROPIC_API_KEY`가 있으면 그것을 먼저 씁니다. 요청은 Windows 기본 `C:\Windows\System32\curl.exe`로 보내며, 키는 명령줄이 아니라 표준 입력으로 넘깁니다.
+- **API 키:** 처음 누르면 [Anthropic Console](https://console.anthropic.com)에서 만든 키(`sk-ant-…`)를 입력하는 칸이 나옵니다. 키는 이 Windows 계정에서만 풀 수 있게 DPAPI로 암호화해 `.private\state\ai.key`에 저장합니다. 이 파일에 키를 직접 적어 넣어도 되며, 처음 쓸 때 암호화된 형태로 바꿔 저장합니다. 환경 변수 `ANTHROPIC_API_KEY`가 있으면 그것을 먼저 씁니다. 요청은 Windows 기본 `C:\Windows\System32\curl.exe`로 보내며, 키는 명령줄이 아니라 표준 입력으로 넘깁니다.
 - 답변은 `.private\state\ai-answers.tsv`에 저장돼 같은 항목은 다시 묻지 않고 바로 보여 줍니다("다시 묻기"로 새로 물을 수 있음). 지워도 됩니다.
 
 `security-watch.exe --ai-prompt "<항목>" "<세부 줄>" ...`는 이 PC 항목에 대해 보낼 내용을 아무것도 보내지 않고 출력만 합니다.

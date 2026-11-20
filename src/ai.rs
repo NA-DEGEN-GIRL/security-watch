@@ -241,8 +241,16 @@ impl Ai {
             }
         }
         let blob = std::fs::read(key_path(&self.root)).map_err(|_| "API 키가 없습니다".to_string())?;
-        let plain = win::unprotect(&blob).ok_or("저장된 API 키를 풀 수 없습니다 (다른 Windows 계정에서 저장한 키). 키를 다시 입력하세요")?;
-        String::from_utf8(plain).map_err(|_| "저장된 API 키가 손상됐습니다".to_string())
+        if let Some(plain) = win::unprotect(&blob) {
+            return String::from_utf8(plain).map_err(|_| "저장된 API 키가 손상됐습니다".to_string());
+        }
+        // A key typed into the file by hand: use it, and replace the file with the
+        // encrypted form so it does not stay readable on disk.
+        if let Some(key) = plain_key(&blob) {
+            let _ = self.save_key(&key);
+            return Ok(key);
+        }
+        Err("저장된 API 키를 풀 수 없습니다 (다른 Windows 계정에서 암호화한 키이거나 키 형식이 아님). 키를 다시 입력하세요".into())
     }
 
     pub fn save_key(&self, key: &str) -> Result<(), String> {
@@ -338,6 +346,13 @@ impl Ai {
             ctx.request_repaint();
         });
     }
+}
+
+/// `ai.key` written as text (optionally with a BOM, quotes or a trailing newline).
+fn plain_key(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let key = text.trim_start_matches('\u{feff}').trim().trim_matches(['"', '\'']).trim();
+    valid_key(key).then(|| key.to_string())
 }
 
 fn valid_key(key: &str) -> bool {
@@ -900,6 +915,25 @@ mod tests {
     fn live_call_with_a_bad_key_is_rejected_cleanly() {
         let e = call_api("sk-ant-api03-not-a-real-key-000000000000", DEFAULT_MODEL, "test \"quoted\" \\ 줄\n바꿈").unwrap_err();
         assert!(e.contains("HTTP 401"), "{e}");
+    }
+
+    #[test]
+    fn hand_written_key_file_is_accepted_and_encrypted() {
+        let dir = std::env::temp_dir().join(format!("sw-ai-key-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        let key = "sk-ant-api03-handwritten-key-0000000000";
+        std::fs::write(key_path(&dir), format!("\u{feff}{key}\r\n")).unwrap();
+        let ai = Ai::new(dir.clone(), Settings { enabled: true, model: DEFAULT_MODEL.into(), mask: true, confirm: true });
+        if std::env::var("ANTHROPIC_API_KEY").is_err() {
+            assert_eq!(ai.load_key().unwrap(), key);
+            let stored = std::fs::read(key_path(&dir)).unwrap();
+            assert!(!String::from_utf8_lossy(&stored).contains("sk-ant-"), "file should now be encrypted");
+            assert_eq!(ai.load_key().unwrap(), key);
+        }
+        assert_eq!(plain_key(b"'sk-ant-api03-abcdefghijklmnop'\n").as_deref(), Some("sk-ant-api03-abcdefghijklmnop"));
+        assert!(plain_key(b"not a key").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

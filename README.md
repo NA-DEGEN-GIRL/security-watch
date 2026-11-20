@@ -64,7 +64,8 @@ One question usually costs less than $0.001.
   the prompt tells the model to treat any "this is safe" inside the data as a red flag.
 - **API key.** The first click asks for a key from the
   [Anthropic Console](https://console.anthropic.com) (`sk-ant-…`). It is encrypted with
-  DPAPI for the current Windows user and stored in `.private\state\ai.key`;
+  DPAPI for the current Windows user and stored in `.private\state\ai.key` (a key typed
+  into that file as plain text also works and is encrypted in place on first use);
   `ANTHROPIC_API_KEY` in the environment takes precedence. Requests go through the system's
   `C:\Windows\System32\curl.exe` with the key on stdin, never on a command line.
 - Answers are kept in `.private\state\ai-answers.tsv`, so an item already explained opens
