@@ -7,6 +7,7 @@ use crate::config::Kind;
 use crate::eval::{Finding, Level};
 use crate::win;
 use eframe::egui::{self, Align, Color32, CornerRadius, FontFamily, Layout, Margin, RichText, Sense, Stroke};
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +41,17 @@ pub struct Gui {
     key_message: Option<String>,
     editing_key: bool,
     show_sent: bool,
+    /// Top bar widths measured on the previous frame, to decide whether the status
+    /// part fits next to the title and the controls or needs its own row.
+    bar: Cell<BarWidths>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct BarWidths {
+    title: f32,
+    controls: f32,
+    status: f32,
+    two_rows: bool,
 }
 
 /// Names the AI request must not carry: server aliases and host names.
@@ -167,6 +179,7 @@ impl Gui {
             key_message: None,
             editing_key: false,
             show_sent: false,
+            bar: Cell::new(BarWidths::default()),
         }
     }
 
@@ -185,70 +198,108 @@ impl Gui {
         self.ai_open = Some(s);
     }
 
+    /// Title and overall status on the left; scan controls on the right; the status
+    /// text (last/next scan, reference point) between them when the window is wide
+    /// enough, or right-aligned on a second row when it is not. The decision uses the
+    /// widths measured on the previous frame, with a margin so it does not flicker
+    /// while the countdown text changes length.
     fn top_bar(&self, ui: &mut egui::Ui, g: &Inner, p: &Palette, now: u64, actions: &mut Vec<Action>) {
+        let mut w = self.bar.get();
+        let gap = 32.0;
+        let need = w.title + w.controls + w.status + gap;
+        let avail = ui.available_width();
+        let two_rows = if w.two_rows { need + 40.0 > avail } else { need > avail };
+        if two_rows != w.two_rows {
+            ui.ctx().request_repaint(); // re-lay out at once, not on the next 1 s tick
+        }
+        w.two_rows = two_rows;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("security-watch").strong().size(17.0));
-            let worst = g.hosts.iter().map(|h| g.host_level(h, now)).max().unwrap_or(Level::Ok);
-            let text = match worst {
-                Level::Alert => "위험 항목 있음",
-                Level::Warn => "주의 항목 있음",
-                _ => "전체 정상",
-            };
-            badge(ui, p, worst, text);
-
+            w.title = ui
+                .horizontal(|ui| {
+                    ui.label(RichText::new("security-watch").strong().size(17.0));
+                    let worst = g.hosts.iter().map(|h| g.host_level(h, now)).max().unwrap_or(Level::Ok);
+                    let text = match worst {
+                        Level::Alert => "위험 항목 있음",
+                        Level::Warn => "주의 항목 있음",
+                        _ => "전체 정상",
+                    };
+                    badge(ui, p, worst, text);
+                })
+                .response
+                .rect
+                .width();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let mut alarm = g.alarm_on;
-                if ui.checkbox(&mut alarm, "알림").on_hover_text("위험 이벤트가 생기면 트레이 알림과 소리로 알려 줍니다").changed() {
-                    actions.push(Action::Alarm(alarm));
+                w.controls = ui.horizontal(|ui| self.bar_controls(ui, g, p, actions)).response.rect.width();
+                if !two_rows {
+                    ui.separator();
+                    w.status = ui.horizontal(|ui| self.bar_status(ui, g, p, now, actions)).response.rect.width();
                 }
-                ui.separator();
-                let scanning = g.hosts.iter().any(|h| h.scanning);
-                if ui.add_enabled(!scanning, egui::Button::new(RichText::new("지금 전체 검사").strong())).clicked() {
-                    actions.push(Action::Scan);
-                }
-                let mut minutes = g.scan_minutes;
-                egui::ComboBox::from_id_salt("every")
-                    .selected_text(format!("{minutes}분마다"))
-                    .width(90.0)
-                    .show_ui(ui, |ui| {
-                        for m in [1, 5, 15, 30, 60] {
-                            ui.selectable_value(&mut minutes, m, format!("{m}분마다"));
-                        }
-                    });
-                if minutes != g.scan_minutes {
-                    actions.push(Action::Minutes(minutes));
-                }
-                ui.label(RichText::new("전체 검사").color(p.muted));
-                ui.separator();
-                if ui
-                    .button("기준 시점을 지금으로")
-                    .on_hover_text("이 시각 이전의 로그 기록(이미 조치한 과거 공격 등)은 점검 결과에서 제외합니다")
-                    .clicked()
-                {
-                    actions.push(Action::Ask(Confirm::WatchSince));
-                }
-                let since = if g.watch_since > 0 {
-                    format!("기준 시점 {} 이후", win::fmt_clock(g.watch_since, now, self.offset))
-                } else {
-                    "기준 시점 없음 (최근 24시간)".to_string()
-                };
-                ui.label(RichText::new(since).color(p.muted));
-                ui.separator();
-                let last = g.hosts.iter().map(|h| h.last_scan).max().unwrap_or(0);
-                let next = g.hosts.iter().filter(|h| h.last_scan > 0).map(|h| h.last_scan).min().map(|t| t + g.scan_minutes * 60);
-                let meta = if scanning {
-                    "전체 검사 중...".to_string()
-                } else if last > 0 {
-                    format!("마지막 전체 검사 {} · 다음 {}", ago(last, now), next.map(|n| until(n, now)).unwrap_or_default())
-                } else {
-                    "첫 검사 준비 중".to_string()
-                };
-                if scanning {
-                    ui.spinner();
-                }
-                ui.label(RichText::new(meta).color(p.muted));
             });
         });
+        if two_rows {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                w.status = ui.horizontal(|ui| self.bar_status(ui, g, p, now, actions)).response.rect.width();
+            });
+        }
+        self.bar.set(w);
+    }
+
+    /// Right-to-left: 알림, 지금 전체 검사, interval.
+    fn bar_controls(&self, ui: &mut egui::Ui, g: &Inner, p: &Palette, actions: &mut Vec<Action>) {
+        let mut alarm = g.alarm_on;
+        if ui.checkbox(&mut alarm, "알림").on_hover_text("위험 이벤트가 생기면 트레이 알림과 소리로 알려 줍니다").changed() {
+            actions.push(Action::Alarm(alarm));
+        }
+        ui.separator();
+        let scanning = g.hosts.iter().any(|h| h.scanning);
+        if ui.add_enabled(!scanning, egui::Button::new(RichText::new("지금 전체 검사").strong())).clicked() {
+            actions.push(Action::Scan);
+        }
+        let mut minutes = g.scan_minutes;
+        egui::ComboBox::from_id_salt("every")
+            .selected_text(format!("{minutes}분마다"))
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for m in [1, 5, 15, 30, 60] {
+                    ui.selectable_value(&mut minutes, m, format!("{m}분마다"));
+                }
+            });
+        if minutes != g.scan_minutes {
+            actions.push(Action::Minutes(minutes));
+        }
+        ui.label(RichText::new("전체 검사").color(p.muted));
+    }
+
+    /// Right-to-left: reference point button and text, then last/next scan.
+    fn bar_status(&self, ui: &mut egui::Ui, g: &Inner, p: &Palette, now: u64, actions: &mut Vec<Action>) {
+        if ui
+            .button("기준 시점을 지금으로")
+            .on_hover_text("이 시각 이전의 로그 기록(이미 조치한 과거 공격 등)은 점검 결과에서 제외합니다")
+            .clicked()
+        {
+            actions.push(Action::Ask(Confirm::WatchSince));
+        }
+        let since = if g.watch_since > 0 {
+            format!("기준 시점 {} 이후", win::fmt_clock(g.watch_since, now, self.offset))
+        } else {
+            "기준 시점 없음 (최근 24시간)".to_string()
+        };
+        ui.label(RichText::new(since).color(p.muted));
+        ui.separator();
+        let scanning = g.hosts.iter().any(|h| h.scanning);
+        let last = g.hosts.iter().map(|h| h.last_scan).max().unwrap_or(0);
+        let next = g.hosts.iter().filter(|h| h.last_scan > 0).map(|h| h.last_scan).min().map(|t| t + g.scan_minutes * 60);
+        let meta = if scanning {
+            "전체 검사 중...".to_string()
+        } else if last > 0 {
+            format!("마지막 전체 검사 {} · 다음 {}", ago(last, now), next.map(|n| until(n, now)).unwrap_or_default())
+        } else {
+            "첫 검사 준비 중".to_string()
+        };
+        if scanning {
+            ui.spinner();
+        }
+        ui.label(RichText::new(meta).color(p.muted));
     }
 
     fn host_card(&self, ui: &mut egui::Ui, g: &Inner, h: &HostState, p: &Palette, now: u64, actions: &mut Vec<Action>) {
@@ -297,13 +348,25 @@ impl Gui {
                 let fails = h.counter(&["ssh_fail", "rdp_fail", "logon_fail", "sudo_fail"]);
                 let logins = h.counter(&["login", "login_pub"]);
                 let pub_conns = h.conns.iter().filter(|c| c.public).count();
-                ui.columns(4, |c| {
-                    stat(&mut c[0], p, ext.to_string(), "외부 접근", ext > 0);
-                    stat(&mut c[1], p, fails.to_string(), "인증 실패", fails > 0);
-                    stat(&mut c[2], p, logins.to_string(), "로그인", false);
-                    let conns = if pub_conns > 0 { format!("{} (외부 {pub_conns})", h.conns.len()) } else { h.conns.len().to_string() };
-                    stat(&mut c[3], p, conns, "현재 연결", pub_conns > 0);
-                });
+                let conns = if pub_conns > 0 { format!("{} (외부 {pub_conns})", h.conns.len()) } else { h.conns.len().to_string() };
+                let tiles = [
+                    (ext.to_string(), "외부 접근", ext > 0),
+                    (fails.to_string(), "인증 실패", fails > 0),
+                    (logins.to_string(), "로그인", false),
+                    (conns, "현재 연결", pub_conns > 0),
+                ];
+                // Four in a row while each tile has room for its label, else 2 x 2.
+                let per_row = if ui.available_width() >= 4.0 * 92.0 { 4 } else { 2 };
+                for (i, row) in tiles.chunks(per_row).enumerate() {
+                    if i > 0 {
+                        ui.add_space(2.0);
+                    }
+                    ui.columns(per_row, |c| {
+                        for (col, (value, label, hot)) in c.iter_mut().zip(row) {
+                            stat(col, p, value.clone(), label, *hot);
+                        }
+                    });
+                }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if h.scanning {
@@ -329,14 +392,9 @@ impl Gui {
 
     fn findings_panel(&self, ui: &mut egui::Ui, g: &Inner, p: &Palette, now: u64, actions: &mut Vec<Action>) {
         panel(ui, p, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("점검 결과").strong().size(15.0));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let scope = if g.watch_since > 0 && now.saturating_sub(g.watch_since) < 86_400 { "기준 시점 이후" } else { "최근 24시간" };
-                    let hint = if self.selected.is_some() { "선택한 대상만 표시 중".to_string() } else { format!("{scope} 로그 + 기준선 비교") };
-                    ui.label(RichText::new(hint).color(p.muted).size(12.5));
-                });
-            });
+            let scope = if g.watch_since > 0 && now.saturating_sub(g.watch_since) < 86_400 { "기준 시점 이후" } else { "최근 24시간" };
+            let hint = if self.selected.is_some() { "선택한 대상만 표시 중".to_string() } else { format!("{scope} 로그 + 기준선 비교") };
+            panel_header(ui, p, "점검 결과", &hint);
             ui.add_space(4.0);
             egui::ScrollArea::vertical().id_salt("findings").max_height(440.0).auto_shrink([false, true]).show(ui, |ui| {
                 for (i, h) in g.hosts.iter().filter(|h| self.selected.as_ref().is_none_or(|s| *s == h.target.name)).enumerate() {
@@ -438,12 +496,7 @@ impl Gui {
 
     fn conns_panel(&self, ui: &mut egui::Ui, g: &Inner, p: &Palette) {
         panel(ui, p, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("지금 들어와 있는 연결").strong().size(15.0));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new("열려 있는 포트로 들어온 연결 · 5초마다 갱신 · 빨간색은 공인(외부) IP").color(p.muted).size(12.5));
-                });
-            });
+            panel_header(ui, p, "지금 들어와 있는 연결", "열려 있는 포트로 들어온 연결 · 5초마다 갱신 · 빨간색은 공인(외부) IP");
             let mut rows: Vec<_> = g
                 .hosts
                 .iter()
@@ -480,12 +533,7 @@ impl Gui {
 
     fn usb_panel(&self, ui: &mut egui::Ui, g: &Inner, p: &Palette) {
         panel(ui, p, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("USB 키보드형 장치 (BadUSB 감시)").strong().size(15.0));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new("새로 꽂은 장치의 Windows 키·단축키·초고속 입력을 감지 · 입력한 글자는 기록하지 않음").color(p.muted).size(12.5));
-                });
-            });
+            panel_header(ui, p, "USB 키보드형 장치 (BadUSB 감시)", "새로 꽂은 장치의 Windows 키·단축키·초고속 입력을 감지 · 입력한 글자는 기록하지 않음");
             let devs: Vec<_> = g.usb.iter().collect();
             if devs.is_empty() {
                 ui.label(RichText::new("연결된 USB 키보드형 장치가 없습니다.").color(p.muted));
@@ -554,6 +602,26 @@ impl Gui {
             Some(false) => self.confirm = None,
             None => {}
         }
+    }
+}
+
+/// Panel title with a muted hint right-aligned on the same line, or wrapped on its own
+/// line under the title when the panel is too narrow for both.
+fn panel_header(ui: &mut egui::Ui, p: &Palette, title: &str, hint: &str) {
+    let width = |text: &str, size: f32| ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(size), Color32::WHITE).size().x;
+    let fits = width(title, 15.0) + width(hint, 12.5) + 24.0 <= ui.available_width();
+    let title = RichText::new(title).strong().size(15.0);
+    let hint = RichText::new(hint).color(p.muted).size(12.5);
+    if fits {
+        ui.horizontal(|ui| {
+            ui.label(title);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(hint);
+            });
+        });
+    } else {
+        ui.label(title);
+        ui.add(egui::Label::new(hint).wrap());
     }
 }
 
