@@ -12,7 +12,7 @@ accounts, keys, ports and autoruns.
 
 - **Read-only.** It never changes anything on the hosts it checks.
 - **Minimal dependencies.** One crate, `eframe` (egui), for the native window; everything
-  else is the Rust standard library plus `ssh` and PowerShell, which ship with Windows.
+  else is the Rust standard library plus `ssh`, PowerShell and `curl`, which ship with Windows.
   Servers need nothing installed; checks run as shell scripts over SSH.
 - **Private by default.** Host names, baselines and reports stay in a git-ignored folder.
 
@@ -41,6 +41,37 @@ How fresh the data is:
 - **Reference point:** "기준 시점을 지금으로" (reset reference point) hides log entries
   older than now, for example after you fixed an exposure, so attacks you already handled
   stop showing up. Baseline comparison and live events are not affected.
+
+## AI explanation (optional)
+
+Every scan result, and every warning or alert in the live feed, has an **AI 설명** (AI
+explanation) button. It asks Claude (`claude-haiku-5-5` by default) whether the item is
+something to worry about and shows a verdict (looks safe / check / likely dangerous), a
+one-line summary, the reasoning, and up to three steps to check it yourself, in Korean.
+One question usually costs less than $0.001.
+
+- **Only on a click.** The window first shows the exact text that will be sent; nothing
+  leaves the PC until you press "보내고 묻기" (send). `ai-confirm off` skips the preview.
+- **Masked.** IP addresses become `<공인IP-1>` (public) / `<사설IP-1>` (private); the PC
+  name, server names and the Windows user name become `<이PC>`, `<서버>`, `<사용자>`.
+  `ai-mask off` sends them as they are.
+- **Local facts first.** For programs and files named in the item, this PC is checked
+  before asking: where the program runs from, its Authenticode signature and signer,
+  version info and the ports it listens on (`src/ai_facts.ps1`). A familiar name that is
+  unsigned or in the wrong folder shows up as such instead of being guessed at.
+- **Advice only.** An answer never accepts a baseline or hides a finding. Parts of the
+  input (account names, process names, command lines) can be written by an attacker, and
+  the prompt tells the model to treat any "this is safe" inside the data as a red flag.
+- **API key.** The first click asks for a key from the
+  [Anthropic Console](https://console.anthropic.com) (`sk-ant-…`). It is encrypted with
+  DPAPI for the current Windows user and stored in `.private\state\ai.key`;
+  `ANTHROPIC_API_KEY` in the environment takes precedence. Requests go through the system's
+  `C:\Windows\System32\curl.exe` with the key on stdin, never on a command line.
+- Answers are kept in `.private\state\ai-answers.tsv`, so an item already explained opens
+  at once ("다시 묻기" asks again). The file is safe to delete.
+
+`security-watch.exe --ai-prompt "<item>" "<detail line>" ...` prints what would be sent
+for an item on this PC, without sending anything.
 
 ## What it checks
 
@@ -126,6 +157,10 @@ Optional lines in `security-watch.conf`:
 usb-lock off            # BadUSB guard only warns, never locks the PC
 alarm off               # no tray notification / sound
 ignore <text>           # drop live events containing this text (e.g. a folder of your own builds)
+ai off                  # hide the AI explanation buttons
+ai-model <model id>     # Claude model for AI explanations (default: claude-haiku-5-5)
+ai-mask off             # do not mask IPs and names before sending
+ai-confirm off          # ask right away, without showing the text first
 ```
 
 ## Files
@@ -137,6 +172,8 @@ ignore <text>           # drop live events containing this text (e.g. a folder o
   state/watch_since       reference point
   state/<host>.outproc    programs already seen talking to the internet
   state/<host>.lastrun    end of the last window (--once)
+  state/ai.key            API key for AI explanations (DPAPI, this Windows user only)
+  state/ai-answers.tsv    AI explanation answers
   reports/report-*.txt    --once reports
 ```
 
@@ -151,6 +188,9 @@ copied exe works anywhere.
   left behind even if the program is killed.
 - The scripts only read logs and system state; see `src/probe_linux.sh`, `src/live_linux.sh`
   (servers) and `src/probe_windows.ps1`, `src/live_windows.ps1` (this PC).
+- The only outbound traffic of its own is the AI explanation: one HTTPS request to
+  `api.anthropic.com`, after you clicked and saw what is sent. Names and paths taken from
+  logs reach the local facts script only as base64 data, never as script text.
 
 ## License
 

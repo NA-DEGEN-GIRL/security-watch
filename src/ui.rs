@@ -1,5 +1,6 @@
 //! Dashboard mode: native window, live feeds, periodic full scans.
 
+use crate::ai::{self, Ai};
 use crate::app::{App, Conn, LiveState};
 use crate::config::{self, Kind, Target};
 use crate::eval::{Finding, Level};
@@ -46,14 +47,18 @@ pub fn run(root: PathBuf, demo: bool) {
     if !win::single_instance("Local\\security-watch-dashboard", gui::TITLE) {
         return; // the running window was brought to the front
     }
+    let opts = config::options(&root);
+    let ai = Arc::new(Ai::new(
+        root.clone(),
+        ai::Settings { enabled: opts.ai, model: opts.ai_model.clone(), mask: opts.ai_mask, confirm: opts.ai_confirm || demo },
+    ));
     let app = if demo {
         Arc::new(demo_app())
     } else {
         let (targets, _) = config::load(&root);
-        let opts = config::options(&root);
         let watch_usb = targets.iter().any(|t| matches!(t.kind, Kind::Local));
         let mut app = App::new(root, targets.clone());
-        app.ignore = opts.ignore;
+        app.ignore = opts.ignore.clone();
         app.lock().alarm_on = opts.alarm;
         let app = Arc::new(app);
         if watch_usb {
@@ -77,7 +82,7 @@ pub fn run(root: PathBuf, demo: bool) {
         ..Default::default()
     };
     let gui_app = Arc::clone(&app);
-    if let Err(e) = eframe::run_native(gui::TITLE, options, Box::new(move |cc| Ok(Box::new(Gui::new(cc, gui_app))))) {
+    if let Err(e) = eframe::run_native(gui::TITLE, options, Box::new(move |cc| Ok(Box::new(Gui::new(cc, gui_app, ai))))) {
         win::message_box(gui::TITLE, &format!("창을 열지 못했습니다: {e}"));
     }
     app.shutdown();

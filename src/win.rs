@@ -276,3 +276,65 @@ pub fn now_file_stamp() -> String {
     let t = local_time();
     format!("{:04}{:02}{:02}-{:02}{:02}{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second)
 }
+
+// ----- DPAPI: secrets only this Windows user can decrypt (used for the AI API key) -----
+
+#[repr(C)]
+struct DataBlob {
+    len: u32,
+    data: *mut u8,
+}
+
+#[link(name = "crypt32")]
+unsafe extern "system" {
+    fn CryptProtectData(input: *const DataBlob, descr: *const u16, entropy: *const DataBlob, reserved: *mut c_void, prompt: *mut c_void, flags: u32, out: *mut DataBlob) -> i32;
+    fn CryptUnprotectData(input: *const DataBlob, descr: *mut *mut u16, entropy: *const DataBlob, reserved: *mut c_void, prompt: *mut c_void, flags: u32, out: *mut DataBlob) -> i32;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn LocalFree(mem: *mut c_void) -> *mut c_void;
+}
+
+const CRYPTPROTECT_UI_FORBIDDEN: u32 = 0x1;
+/// Ties the encrypted blob to this program, so another app calling DPAPI for the same
+/// user cannot simply decrypt it by accident.
+const DPAPI_ENTROPY: &[u8] = b"security-watch/ai-key/v1";
+
+fn dpapi(data: &[u8], protect: bool) -> Option<Vec<u8>> {
+    let input = DataBlob { len: data.len() as u32, data: data.as_ptr() as *mut u8 };
+    let entropy = DataBlob { len: DPAPI_ENTROPY.len() as u32, data: DPAPI_ENTROPY.as_ptr() as *mut u8 };
+    let mut out = DataBlob { len: 0, data: std::ptr::null_mut() };
+    let null = std::ptr::null_mut();
+    let ok = unsafe {
+        if protect {
+            CryptProtectData(&input, std::ptr::null(), &entropy, null, null, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+        } else {
+            CryptUnprotectData(&input, std::ptr::null_mut(), &entropy, null, null, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+        }
+    };
+    if ok == 0 || out.data.is_null() {
+        return None;
+    }
+    let v = unsafe { std::slice::from_raw_parts(out.data, out.len as usize).to_vec() };
+    unsafe { LocalFree(out.data as *mut c_void) };
+    Some(v)
+}
+
+pub fn protect(data: &[u8]) -> Option<Vec<u8>> {
+    dpapi(data, true)
+}
+
+pub fn unprotect(data: &[u8]) -> Option<Vec<u8>> {
+    dpapi(data, false)
+}
+
+#[cfg(test)]
+mod dpapi_tests {
+    #[test]
+    fn protect_round_trip() {
+        let blob = super::protect(b"sk-ant-test").expect("protect");
+        assert_ne!(blob, b"sk-ant-test");
+        assert_eq!(super::unprotect(&blob).as_deref(), Some(&b"sk-ant-test"[..]));
+    }
+}

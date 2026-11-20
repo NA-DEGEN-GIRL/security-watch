@@ -3,11 +3,13 @@
 //! Read-only on every host.
 #![windows_subsystem = "windows"]
 
+mod ai;
 mod app;
 mod baseline;
 mod config;
 mod eval;
 mod gui;
+mod json;
 mod live;
 mod notify;
 mod probe;
@@ -44,6 +46,25 @@ fn main() {
         for line in live::replay(args.get(i + 1).map(String::as_str) == Some("windows"), &text) {
             println!("{line}");
         }
+        return;
+    }
+    // `--ai-prompt <text> [detail...]`: prints what "AI 설명" would send for a finding
+    // on this PC (local facts collected, names masked), without sending anything.
+    if let Some(i) = args.iter().position(|a| a == "--ai-prompt") {
+        win::ensure_console();
+        win::init_console();
+        let opts = config::options(&root);
+        let s = ai::Subject {
+            source: "점검 결과",
+            local: true,
+            lan_only: true,
+            level: eval::Level::Warn,
+            text: args.get(i + 1).cloned().unwrap_or_default(),
+            details: args.iter().skip(i + 2).cloned().collect(),
+            private_names: std::env::var("COMPUTERNAME").map(|n| vec![(n, "<이PC>".to_string())]).unwrap_or_default(),
+            title: "이 PC".into(),
+        };
+        println!("{}", ai::preview(&s, opts.ai_mask));
         return;
     }
     if has("--once") {

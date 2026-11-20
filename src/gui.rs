@@ -1,6 +1,7 @@
 //! Native dashboard window (egui). Reads the shared `App` state every frame and
 //! turns button clicks into `App` actions.
 
+use crate::ai::{self, Ai, KeySource, Subject, View};
 use crate::app::{App, HostState, Inner, LiveState};
 use crate::config::Kind;
 use crate::eval::{Finding, Level};
@@ -22,15 +23,55 @@ enum Action {
     Minutes(u64),
     Alarm(bool),
     Ask(Confirm),
+    Explain(Subject),
 }
 
 pub struct Gui {
     app: Arc<App>,
+    ai: Arc<Ai>,
     selected: Option<String>,
     show_all_events: bool,
     confirm: Option<Confirm>,
     message: Option<String>,
     offset: i64,
+    /// Row shown in the "AI 설명" window.
+    ai_open: Option<Subject>,
+    key_input: String,
+    key_message: Option<String>,
+    editing_key: bool,
+    show_sent: bool,
+}
+
+/// Names the AI request must not carry: server aliases and host names.
+fn private_names(g: &Inner) -> Vec<(String, String)> {
+    let mut v = Vec::new();
+    for h in &g.hosts {
+        let local = matches!(h.target.kind, Kind::Local);
+        if !local {
+            v.push((h.target.name.clone(), "<서버>".to_string()));
+        }
+        if let Some(hn) = &h.hostname {
+            v.push((hn.clone(), if local { "<이PC>" } else { "<서버>" }.to_string()));
+        }
+    }
+    v
+}
+
+fn subject(g: &Inner, h: &HostState, source: &'static str, level: Level, text: &str, details: &[String]) -> Subject {
+    Subject {
+        source,
+        local: matches!(h.target.kind, Kind::Local),
+        lan_only: matches!(h.target.kind, Kind::Remote { lan_only: true }),
+        level,
+        text: text.to_string(),
+        details: details.to_vec(),
+        private_names: private_names(g),
+        title: h.target.title(),
+    }
+}
+
+fn short(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n).collect::<String>() + "…" }
 }
 
 struct Palette {
@@ -110,10 +151,38 @@ fn until(ts: u64, now: u64) -> String {
 }
 
 impl Gui {
-    pub fn new(cc: &eframe::CreationContext<'_>, app: Arc<App>) -> Gui {
+    pub fn new(cc: &eframe::CreationContext<'_>, app: Arc<App>, ai: Arc<Ai>) -> Gui {
         setup_fonts(&cc.egui_ctx);
         cc.egui_ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::System);
-        Gui { app, selected: None, show_all_events: false, confirm: None, message: None, offset: win::local_offset() }
+        Gui {
+            app,
+            ai,
+            selected: None,
+            show_all_events: false,
+            confirm: None,
+            message: None,
+            offset: win::local_offset(),
+            ai_open: None,
+            key_input: String::new(),
+            key_message: None,
+            editing_key: false,
+            show_sent: false,
+        }
+    }
+
+    /// A row's AI state for the inline line: None = no button.
+    fn ai_row(&self, s: &Subject) -> Option<Option<ai::Answer>> {
+        self.ai.settings.enabled.then(|| self.ai.answer(&s.key()))
+    }
+
+    fn open_explain(&mut self, s: Subject, ctx: &egui::Context) {
+        self.show_sent = false;
+        self.key_message = None;
+        let key = s.key();
+        if self.ai.key_source() != KeySource::Missing && matches!(self.ai.view(&key), View::None) {
+            self.ai.prepare(s.clone(), ctx.clone());
+        }
+        self.ai_open = Some(s);
     }
 
     fn top_bar(&self, ui: &mut egui::Ui, g: &Inner, p: &Palette, now: u64, actions: &mut Vec<Action>) {
@@ -300,17 +369,20 @@ impl Gui {
                     let mut all: Vec<&Finding> = h.findings.iter().chain(&h.changes).collect();
                     all.sort_by(|a, b| b.level.cmp(&a.level));
                     if !all.iter().any(|f| f.level >= Level::Warn) {
-                        finding_row(ui, p, Level::Ok, "주의할 이상 징후 없음", &[]);
+                        finding_row(ui, p, Level::Ok, "주의할 이상 징후 없음", &[], None);
                     }
                     for f in all {
-                        finding_row(ui, p, f.level, &f.text, &f.details);
+                        let s = subject(g, h, "점검 결과", f.level, &f.text, &f.details);
+                        if finding_row(ui, p, f.level, &f.text, &f.details, self.ai_row(&s)) {
+                            actions.push(Action::Explain(s));
+                        }
                     }
                 }
             });
         });
     }
 
-    fn events_panel(&mut self, ui: &mut egui::Ui, g: &Inner, p: &Palette, now: u64) {
+    fn events_panel(&mut self, ui: &mut egui::Ui, g: &Inner, p: &Palette, now: u64, actions: &mut Vec<Action>) {
         panel(ui, p, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("실시간 이벤트").strong().size(15.0));
@@ -336,11 +408,27 @@ impl Gui {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(win::fmt_clock(e.last_ts, now, self.offset)).color(p.muted).monospace().size(12.0));
                         badge(ui, p, e.level, e.level.label());
-                        let host = g.hosts.iter().find(|h| h.target.name == e.host).map(|h| h.target.title()).unwrap_or_else(|| TITLE.to_string());
+                        let hs = g.hosts.iter().find(|h| h.target.name == e.host);
+                        let host = hs.map(|h| h.target.title()).unwrap_or_else(|| TITLE.to_string());
                         ui.label(RichText::new(host).color(p.muted).size(12.0));
                         ui.label(&e.text);
                         if e.count > 1 {
                             ui.label(RichText::new(format!("×{} · {}부터", e.count, win::fmt_clock(e.ts, now, self.offset))).color(p.muted).size(12.0));
+                        }
+                        if let Some(h) = hs.filter(|_| e.level >= Level::Warn) {
+                            let s = subject(g, h, "실시간 이벤트", e.level, &e.text, &[]);
+                            if let Some(state) = self.ai_row(&s) {
+                                let clicked = match state {
+                                    Some(a) => ui
+                                        .add(egui::Button::new(RichText::new(format!("AI: {}", a.verdict.label())).color(p.level(a.verdict.level())).size(12.0)).small())
+                                        .on_hover_text(&a.summary)
+                                        .clicked(),
+                                    None => ui.small_button("AI 설명").on_hover_text("이 이벤트가 걱정할 일인지 AI에게 물어봅니다").clicked(),
+                                };
+                                if clicked {
+                                    actions.push(Action::Explain(s));
+                                }
+                            }
                         }
                     });
                 }
@@ -485,17 +573,219 @@ fn stat(ui: &mut egui::Ui, p: &Palette, value: String, label: &str, hot: bool) {
     });
 }
 
-fn finding_row(ui: &mut egui::Ui, p: &Palette, level: Level, text: &str, details: &[String]) {
+/// `ai`: None = no AI button; Some(answer) = button, plus the cached answer if any.
+/// Returns true when the AI button (or the answer line) was clicked.
+fn finding_row(ui: &mut egui::Ui, p: &Palette, level: Level, text: &str, details: &[String], ai: Option<Option<ai::Answer>>) -> bool {
+    let mut clicked = false;
     ui.horizontal_top(|ui| {
         badge(ui, p, level, level.label());
         ui.vertical(|ui| {
-            ui.label(text);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(text);
+                if matches!(ai, Some(None)) && ui.small_button("AI 설명").on_hover_text("이 항목이 걱정할 일인지 AI에게 물어봅니다").clicked() {
+                    clicked = true;
+                }
+            });
             for d in details {
                 ui.label(RichText::new(format!("• {d}")).color(p.muted).size(12.5));
+            }
+            if let Some(Some(a)) = &ai {
+                let line = RichText::new(format!("AI 의견: {} · {}", a.verdict.label(), short(&a.summary, 80))).color(p.level(a.verdict.level())).size(12.5);
+                if ui.add(egui::Label::new(line).sense(Sense::click())).on_hover_text("클릭하면 AI 설명 전체 보기").clicked() {
+                    clicked = true;
+                }
             }
         });
     });
     ui.add_space(4.0);
+    clicked
+}
+
+fn ago_text(ts: u64) -> String {
+    ago(ts, crate::now_epoch())
+}
+
+impl Gui {
+    fn key_form(&mut self, ui: &mut egui::Ui, p: &Palette, s: &Subject) {
+        ui.label(RichText::new("Anthropic API 키").strong());
+        ui.label(
+            "console.anthropic.com → API Keys에서 만든 키(sk-ant-…)를 붙여 넣으세요. \
+             이 Windows 계정에서만 풀 수 있도록 암호화(DPAPI)해서 .private\\state\\ai.key에 저장합니다. \
+             환경 변수 ANTHROPIC_API_KEY가 있으면 그 키를 먼저 씁니다.",
+        );
+        ui.add(egui::TextEdit::singleline(&mut self.key_input).password(true).hint_text("sk-ant-...").desired_width(f32::INFINITY));
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new("저장").strong()).clicked() {
+                match self.ai.save_key(&self.key_input) {
+                    Ok(()) => {
+                        self.key_input.clear();
+                        self.key_message = None;
+                        self.editing_key = false;
+                        if matches!(self.ai.view(&s.key()), View::None | View::Failed(_)) {
+                            self.ai.prepare(s.clone(), ui.ctx().clone());
+                        }
+                    }
+                    Err(e) => self.key_message = Some(e),
+                }
+            }
+            if self.ai.key_source() == KeySource::File && ui.button("저장된 키 삭제").clicked() {
+                self.ai.delete_key();
+                self.key_message = Some("저장된 키를 삭제했습니다".into());
+            }
+            if self.editing_key && ui.button("취소").clicked() {
+                self.editing_key = false;
+                self.key_input.clear();
+            }
+        });
+        if let Some(m) = &self.key_message {
+            ui.label(RichText::new(m).color(p.alert));
+        }
+    }
+
+    fn answer_view(&self, ui: &mut egui::Ui, p: &Palette, a: &ai::Answer) {
+        ui.horizontal_wrapped(|ui| {
+            badge(ui, p, a.verdict.level(), a.verdict.label());
+            ui.label(RichText::new(&a.summary).strong());
+        });
+        ui.add_space(4.0);
+        ui.label(&a.explanation);
+        if !a.steps.is_empty() {
+            ui.add_space(6.0);
+            ui.label(RichText::new("직접 확인하는 방법").strong());
+            for (i, step) in a.steps.iter().enumerate() {
+                ui.label(format!("{}. {step}", i + 1));
+            }
+        }
+        ui.add_space(6.0);
+        let cost = a.cost_usd().map(|c| format!(" · 약 ${c:.4}")).unwrap_or_default();
+        ui.label(RichText::new(format!("{} · {} · 입력 {} / 출력 {} 토큰{cost}", a.model, ago_text(a.ts), a.input_tokens, a.output_tokens)).color(p.muted).size(12.0));
+    }
+
+    fn ai_window(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some(s) = self.ai_open.clone() else { return };
+        let key = s.key();
+        let mut open = true;
+        let mut close = false;
+        egui::Window::new("AI 설명")
+            .id(egui::Id::unique("security-watch-ai"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(600.0)
+            .default_pos(ctx.content_rect().center() - egui::vec2(300.0, 260.0))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        badge(ui, p, s.level, s.level.label());
+                        ui.label(RichText::new(format!("{} · {}", s.title, s.source)).color(p.muted).size(12.5));
+                    });
+                    ui.label(RichText::new(&s.text).strong());
+                    for d in s.details.iter().take(8) {
+                        ui.label(RichText::new(format!("• {d}")).color(p.muted).size(12.5));
+                    }
+                    if s.details.len() > 8 {
+                        ui.label(RichText::new(format!("… 외 {}줄", s.details.len() - 8)).color(p.muted).size(12.5));
+                    }
+                    ui.separator();
+
+                    if self.ai.key_source() == KeySource::Missing || self.editing_key {
+                        self.key_form(ui, p, &s);
+                        return;
+                    }
+                    let model = self.ai.settings.model.clone();
+                    match self.ai.view(&key) {
+                        View::None => {
+                            if ui.button("AI에게 묻기 준비").clicked() {
+                                self.ai.prepare(s.clone(), ctx.clone());
+                            }
+                        }
+                        View::Preparing => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("이 PC에서 관련 정보(실행 위치·서명·포트)를 확인하는 중…");
+                            });
+                        }
+                        View::Ready(prompt) => {
+                            let masked = if self.ai.settings.mask { " IP 주소·PC 이름·서버 이름·사용자 이름은 가려서 보냅니다." } else { " (ai-mask off: 가리지 않고 그대로 보냅니다)" };
+                            ui.label(format!("아래 내용을 Claude({model})에게 보냅니다.{masked}"));
+                            egui::ScrollArea::vertical().id_salt("ai-prompt").max_height(240.0).show(ui, |ui| {
+                                ui.add(egui::TextEdit::multiline(&mut prompt.as_str()).code_editor().desired_width(f32::INFINITY));
+                            });
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(RichText::new("보내고 묻기").strong()).clicked() {
+                                    self.ai.ask(&key, ctx.clone());
+                                }
+                                if ui.button("취소").clicked() {
+                                    close = true;
+                                }
+                                if model == ai::DEFAULT_MODEL {
+                                    ui.label(RichText::new("보통 한 번에 $0.001 미만").color(p.muted).size(12.0));
+                                }
+                            });
+                        }
+                        View::Asking => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(format!("Claude({model})에게 묻는 중…"));
+                            });
+                        }
+                        View::Failed(e) => {
+                            ui.label(RichText::new(e).color(p.alert));
+                            ui.horizontal(|ui| {
+                                if ui.button("다시 시도").clicked() {
+                                    self.ai.prepare(s.clone(), ctx.clone());
+                                }
+                                if ui.button("API 키 바꾸기").clicked() {
+                                    self.editing_key = true;
+                                }
+                            });
+                        }
+                        View::Done(a) => {
+                            self.answer_view(ui, p, &a);
+                            let sent = self.ai.sent(&key);
+                            ui.horizontal(|ui| {
+                                if ui.button("다시 묻기").clicked() {
+                                    self.show_sent = false;
+                                    self.ai.prepare(s.clone(), ctx.clone());
+                                }
+                                if sent.is_some() {
+                                    ui.toggle_value(&mut self.show_sent, "보낸 내용 보기");
+                                }
+                            });
+                            if let Some(sent) = sent.filter(|_| self.show_sent) {
+                                egui::ScrollArea::vertical().id_salt("ai-sent").max_height(200.0).show(ui, |ui| {
+                                    ui.add(egui::TextEdit::multiline(&mut sent.as_str()).code_editor().desired_width(f32::INFINITY));
+                                });
+                            }
+                        }
+                    }
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("AI 의견은 참고용입니다. 로그 내용 일부는 공격자가 꾸밀 수 있으니, 승인이나 조치는 직접 확인한 뒤 하세요.")
+                                .color(p.muted)
+                                .size(12.0),
+                        );
+                        let src = match self.ai.key_source() {
+                            KeySource::Env => "키: 환경 변수",
+                            KeySource::File => "키: 암호화 저장",
+                            KeySource::Missing => "키 없음",
+                        };
+                        ui.label(RichText::new(src).color(p.muted).size(12.0));
+                        if ui.small_button("API 키 관리").clicked() {
+                            self.editing_key = true;
+                        }
+                    });
+                });
+            });
+        if !open || close {
+            self.ai.dismiss(&key);
+            self.ai_open = None;
+            self.editing_key = false;
+            self.key_input.clear();
+        }
+    }
 }
 
 fn setup_fonts(ctx: &egui::Context) {
@@ -550,7 +840,7 @@ impl eframe::App for Gui {
                     ui.add_space(12.0);
                     ui.columns(2, |cols| {
                         self.findings_panel(&mut cols[0], &g, &p, now, &mut actions);
-                        self.events_panel(&mut cols[1], &g, &p, now);
+                        self.events_panel(&mut cols[1], &g, &p, now, &mut actions);
                     });
                     ui.add_space(12.0);
                     self.conns_panel(ui, &g, &p);
@@ -569,8 +859,10 @@ impl eframe::App for Gui {
                 Action::Minutes(m) => app.set_scan_minutes(m),
                 Action::Alarm(on) => app.set_alarm(on),
                 Action::Ask(c) => self.confirm = Some(c),
+                Action::Explain(s) => self.open_explain(s, &ctx),
             }
         }
+        self.ai_window(&ctx, &p);
         self.confirm_dialog(&ctx);
     }
 }

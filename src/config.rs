@@ -50,6 +50,11 @@ local
 # alarm off                    위험 이벤트가 생겨도 알림(트레이 풍선·소리)을 띄우지 않습니다 (기본: 알림)
 # ignore <문구>                 프로세스·외부 통신 감시에서 이 문구가 들어간 항목은 무시합니다
 #                              (직접 만든/고친 프로그램이 계속 잡힐 때. 예: ignore D:\\tools\\my-app\\)
+#
+# ai off                       점검 결과·이벤트 옆의 'AI 설명' 버튼을 숨깁니다 (기본: 보임)
+# ai-model claude-haiku-5-5    AI 설명에 쓸 Claude 모델 (기본: claude-haiku-5-5)
+# ai-mask off                  보내기 전에 IP·PC 이름·서버 이름·사용자 이름을 가리지 않습니다 (기본: 가림)
+# ai-confirm off               보낼 내용을 먼저 보여 주지 않고 바로 묻습니다 (기본: 먼저 보여 줌)
 ";
 
 /// Where config, baselines and reports live (never inside the published repo):
@@ -91,6 +96,14 @@ pub struct Options {
     pub alarm: bool,
     /// `ignore <text>`: process/network detections containing the text are dropped.
     pub ignore: Vec<String>,
+    /// "AI 설명" buttons (`ai off` hides them).
+    pub ai: bool,
+    /// `ai-model <id>`.
+    pub ai_model: String,
+    /// Mask IPs and names before sending (`ai-mask off`).
+    pub ai_mask: bool,
+    /// Show the text before sending (`ai-confirm off`).
+    pub ai_confirm: bool,
 }
 
 pub fn options(root: &Path) -> Options {
@@ -98,12 +111,26 @@ pub fn options(root: &Path) -> Options {
 }
 
 fn parse_options(text: &str) -> Options {
-    let mut o = Options { usb_lock: true, alarm: true, ignore: Vec::new() };
+    let mut o = Options {
+        usb_lock: true,
+        alarm: true,
+        ignore: Vec::new(),
+        ai: true,
+        ai_model: crate::ai::DEFAULT_MODEL.to_string(),
+        ai_mask: true,
+        ai_confirm: true,
+    };
     for line in text.lines().map(str::trim) {
         let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
-        match (word, rest.trim()) {
+        // allow a trailing "# comment" on option lines
+        let rest = rest.split(" #").next().unwrap_or("").trim();
+        match (word, rest) {
             ("usb-lock", "off") => o.usb_lock = false,
             ("alarm", "off") => o.alarm = false,
+            ("ai", "off") => o.ai = false,
+            ("ai-mask", "off") => o.ai_mask = false,
+            ("ai-confirm", "off") => o.ai_confirm = false,
+            ("ai-model", m) if !m.is_empty() => o.ai_model = m.to_string(),
             ("ignore", t) if !t.is_empty() => o.ignore.push(t.to_lowercase()),
             _ => {}
         }
@@ -146,5 +173,9 @@ mod tests {
         let o = parse_options("local\n# alarm off\nusb-lock  off\nignore D:\\My Tools\\\n");
         assert!(!o.usb_lock && o.alarm);
         assert_eq!(o.ignore, vec!["d:\\my tools\\".to_string()]);
+        assert!(o.ai && o.ai_mask && o.ai_confirm && o.ai_model == crate::ai::DEFAULT_MODEL);
+        let o = parse_options("ai-model claude-sonnet-5-5   # better\nai-mask off\nai-confirm off\nai off\n");
+        assert!(!o.ai && !o.ai_mask && !o.ai_confirm);
+        assert_eq!(o.ai_model, "claude-sonnet-5-5");
     }
 }
